@@ -406,41 +406,53 @@ func normalizePathArg(input string) (string, error) {
 }
 
 func helpText() string {
-	return strings.TrimSpace(`Bonjou command cheat-sheet
+	const (
+		reset   = "\033[0m"
+		heading = "\033[36m"
+		accent  = "\033[96m"
+		dim     = "\033[90m"
+	)
 
-Messaging
-	@send <user/ip> <message>
-		DM a single peer by username or IP address.
-	@multi <user1,user2,...> <message|path>
-		Reach a list of peers; message text or file/folder path accepted.
-	@broadcast <message>
-		Send a quick text announcement to every discovered peer.
+	var b strings.Builder
+	b.WriteString(reset)
+	b.WriteString(heading + "Bonjou Command Guide" + reset + "\n")
+	b.WriteString(dim + "Prefix every command with @. Quote paths that contain spaces." + reset + "\n\n")
 
-File transfer
-	@file <user/ip> <path>
-		Share one file; accepts quotes and ~ expansion.
-	@folder <user/ip> <dir>
-		Stream a directory; useful for project handoffs.
-	@history
-		Show recent sends, receives, and system notices.
+	b.WriteString(heading + "Messaging" + reset + "\n")
+	b.WriteString("  " + accent + "@send <user/ip> <message>" + reset + "\n")
+	b.WriteString("    Direct message a peer by username, hostname, or IP." + "\n")
+	b.WriteString("  " + accent + "@multi <user1,user2,...> <message|path>" + reset + "\n")
+	b.WriteString("    Target a list of peers; send chat text, a file, or a folder." + "\n")
+	b.WriteString("  " + accent + "@broadcast <message>" + reset + "\n")
+	b.WriteString("    Push the same announcement to every discovered peer." + "\n\n")
 
-Discovery & status
-	@users
-		List online peers with IP, port, and last-seen time.
-	@whoami
-		Display your username, LAN IP, and listen port.
-	@status
-		Overview of discovery health and receive directories.
+	b.WriteString(heading + "File Transfer" + reset + "\n")
+	b.WriteString("  " + accent + "@file <user/ip> <path>" + reset + "\n")
+	b.WriteString("    Share a single file. ~ expansion and quoted paths supported." + "\n")
+	b.WriteString("  " + accent + "@folder <user/ip> <dir>" + reset + "\n")
+	b.WriteString("    Stream an entire directory; handy for project hand-offs." + "\n")
+	b.WriteString("  " + accent + "@history" + reset + "\n")
+	b.WriteString("    Review recent sends, receives, and system notices." + "\n\n")
 
-Workspace tools
-	@setpath <dir>
-		Choose where incoming files and folders are stored.
-	@clear [history]
-		Clear the screen; add "history" to wipe saved history.
-	@update
-		Execute local updater script if present.
-	@help
-		Open this guide.
-	@exit
-		Quit Bonjou.`)
+	b.WriteString(heading + "Discovery & Status" + reset + "\n")
+	b.WriteString("  " + accent + "@users" + reset + "\n")
+	b.WriteString("    List online peers with last-seen timestamps." + "\n")
+	b.WriteString("  " + accent + "@whoami" + reset + "\n")
+	b.WriteString("    Show your username, LAN IP, and listening port." + "\n")
+	b.WriteString("  " + accent + "@status" + reset + "\n")
+	b.WriteString("    Summarize discovery health and receive directories." + "\n\n")
+
+	b.WriteString(heading + "Workspace & Maintenance" + reset + "\n")
+	b.WriteString("  " + accent + "@setpath <dir>" + reset + "\n")
+	b.WriteString("    Change where incoming files and folders are stored." + "\n")
+	b.WriteString("  " + accent + "@clear [history]" + reset + "\n")
+	b.WriteString("    Clear the screen, or include history to wipe saved logs." + "\n")
+	b.WriteString("  " + accent + "@update" + reset + "\n")
+	b.WriteString("    Execute a local updater script if one exists." + "\n")
+	b.WriteString("  " + accent + "@help" + reset + "\n")
+	b.WriteString("    View this guide again." + "\n")
+	b.WriteString("  " + accent + "@exit" + reset + "\n")
+	b.WriteString("    Quit Bonjou." + "\n")
+
+	return strings.TrimRight(b.String(), "\n")
 }
