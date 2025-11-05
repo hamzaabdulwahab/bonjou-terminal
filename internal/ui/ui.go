@@ -49,14 +49,15 @@ type progressSnapshot struct {
 
 // UI drives the interactive terminal session.
 type UI struct {
-	session    *session.Session
-	handler    *commands.Handler
-	rl         *readline.Instance
-	done       chan struct{}
-	progress   map[string]progressSnapshot
-	progressMu sync.Mutex
-	printMu    sync.Mutex
-	homeDir    string
+	session        *session.Session
+	handler        *commands.Handler
+	rl             *readline.Instance
+	done           chan struct{}
+	progress       map[string]progressSnapshot
+	progressMu     sync.Mutex
+	printMu        sync.Mutex
+	homeDir        string
+	lastProgressID string
 }
 
 func New(session *session.Session, handler *commands.Handler) (*UI, error) {
@@ -200,8 +201,10 @@ func (u *UI) renderProgress(evt events.Event, ts string) {
 
 	u.progressMu.Lock()
 	snapshot, seen := u.progress[ps.ID]
+	shouldPrint := false
 	if !seen {
 		snapshot = progressSnapshot{}
+		shouldPrint = true
 	}
 	if ps.Path != "" {
 		snapshot.path = ps.Path
@@ -226,7 +229,6 @@ func (u *UI) renderProgress(evt events.Event, ts string) {
 	prevPercent := snapshot.percent
 	snapshot.percent = percent
 
-	shouldPrint := false
 	if ps.Done {
 		shouldPrint = true
 		snapshot.lastPrint = now
@@ -246,7 +248,7 @@ func (u *UI) renderProgress(evt events.Event, ts string) {
 	}
 
 	line := u.formatProgressLine(ts, ps, snapshot, percent, ps.Done, now)
-	u.writeLine(line)
+	u.printProgressLine(ps.ID, line, ps.Done)
 }
 
 func (u *UI) shutdown() {
@@ -261,6 +263,7 @@ func (u *UI) shutdown() {
 func (u *UI) writeLine(line string) {
 	u.printMu.Lock()
 	defer u.printMu.Unlock()
+	u.lastProgressID = ""
 	if u.rl != nil {
 		fmt.Fprintf(u.rl.Stdout(), "\r\033[K%s\n", line)
 		u.rl.Refresh()
@@ -312,6 +315,27 @@ func (u *UI) formatProgressLine(ts string, ps *events.ProgressState, snapshot pr
 	statusSegment := u.progressStatus(snapshot.started, percent, done, now)
 	peerSegment := u.progressPeer(snapshot.direction, snapshot.peer)
 	return fmt.Sprintf("%s[%s]%s %s %s %s%s%s", colorMuted, ts, colorReset, pathSegment, circle, percentSegment, statusSegment, peerSegment)
+}
+
+func (u *UI) printProgressLine(id, line string, done bool) {
+	u.printMu.Lock()
+	defer u.printMu.Unlock()
+	if u.rl == nil {
+		fmt.Println(line)
+		return
+	}
+	out := u.rl.Stdout()
+	if u.lastProgressID == id {
+		fmt.Fprintf(out, "\033[1A\r\033[K%s\n", line)
+	} else {
+		fmt.Fprintf(out, "\r\033[K%s\n", line)
+	}
+	if done {
+		u.lastProgressID = ""
+	} else {
+		u.lastProgressID = id
+	}
+	u.rl.Refresh()
 }
 
 func (u *UI) colorizePath(path string) string {
