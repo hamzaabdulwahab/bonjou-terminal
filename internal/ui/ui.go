@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"strings"
 	"sync"
@@ -38,6 +39,12 @@ var welcomeBanner = []string{
 type progressSnapshot struct {
 	percent   float64
 	lastPrint time.Time
+	started   time.Time
+	path      string
+	peer      string
+	direction string
+	kind      string
+	label     string
 }
 
 // UI drives the interactive terminal session.
@@ -49,6 +56,7 @@ type UI struct {
 	progress   map[string]progressSnapshot
 	progressMu sync.Mutex
 	printMu    sync.Mutex
+	homeDir    string
 }
 
 func New(session *session.Session, handler *commands.Handler) (*UI, error) {
@@ -66,12 +74,14 @@ func New(session *session.Session, handler *commands.Handler) (*UI, error) {
 	if err != nil {
 		return nil, err
 	}
+	home, _ := os.UserHomeDir()
 	return &UI{
 		session:  session,
 		handler:  handler,
 		rl:       rl,
 		done:     make(chan struct{}),
 		progress: make(map[string]progressSnapshot),
+		homeDir:  home,
 	}, nil
 }
 
@@ -175,65 +185,68 @@ func (u *UI) clearScreen() {
 }
 
 func (u *UI) renderProgress(evt events.Event, ts string) {
-	if evt.Progress == nil || evt.Progress.Total <= 0 {
+	ps := evt.Progress
+	if ps == nil || ps.Total <= 0 {
 		return
 	}
-	percent := float64(evt.Progress.Current) / float64(evt.Progress.Total) * 100
+	percent := float64(ps.Current) / float64(ps.Total) * 100
 	if percent < 0 {
 		percent = 0
 	}
 	if percent > 100 {
 		percent = 100
 	}
-	label := evt.Progress.Label
-	if label == "" {
-		label = evt.Progress.ID
-	}
 	now := time.Now()
+
 	u.progressMu.Lock()
-	state, seen := u.progress[evt.Progress.ID]
+	snapshot, seen := u.progress[ps.ID]
+	if !seen {
+		snapshot = progressSnapshot{}
+	}
+	if ps.Path != "" {
+		snapshot.path = ps.Path
+	}
+	if ps.Peer != "" {
+		snapshot.peer = ps.Peer
+	}
+	if ps.Direction != "" {
+		snapshot.direction = ps.Direction
+	}
+	if ps.Kind != "" {
+		snapshot.kind = ps.Kind
+	}
+	if ps.Label != "" {
+		snapshot.label = ps.Label
+	}
+	if !ps.StartedAt.IsZero() {
+		snapshot.started = ps.StartedAt
+	} else if snapshot.started.IsZero() {
+		snapshot.started = now
+	}
+	prevPercent := snapshot.percent
+	snapshot.percent = percent
+
 	shouldPrint := false
-	if evt.Progress.Done {
-		delete(u.progress, evt.Progress.ID)
+	if ps.Done {
 		shouldPrint = true
+		snapshot.lastPrint = now
+		delete(u.progress, ps.ID)
 	} else {
-		if percent >= 100 {
-			state.percent = percent
-			state.lastPrint = now
-			u.progress[evt.Progress.ID] = state
-			u.progressMu.Unlock()
-			return
+		delta := math.Abs(percent - prevPercent)
+		if !seen || delta >= minProgressStep || now.Sub(snapshot.lastPrint) >= minProgressInterval {
+			shouldPrint = true
+			snapshot.lastPrint = now
 		}
-		if !seen {
-			state = progressSnapshot{percent: percent}
-			if percent >= minProgressStep {
-				shouldPrint = true
-				state.lastPrint = now
-			}
-			u.progress[evt.Progress.ID] = state
-		} else {
-			if percent-state.percent >= minProgressStep && (state.lastPrint.IsZero() || now.Sub(state.lastPrint) >= minProgressInterval) {
-				shouldPrint = true
-				state.percent = percent
-				state.lastPrint = now
-				u.progress[evt.Progress.ID] = state
-			} else {
-				state.percent = percent
-				u.progress[evt.Progress.ID] = state
-			}
-		}
+		u.progress[ps.ID] = snapshot
 	}
 	u.progressMu.Unlock()
+
 	if !shouldPrint {
 		return
 	}
-	marker := colorMuted
-	message := fmt.Sprintf("%s[%s] %s %.1f%%%s", marker, ts, label, percent, colorReset)
-	if evt.Progress.Done {
-		marker = colorSuccess
-		message = fmt.Sprintf("%s[%s] %s complete%s", marker, ts, label, colorReset)
-	}
-	u.writeLine(message)
+
+	line := u.formatProgressLine(ts, ps, snapshot, percent, ps.Done, now)
+	u.writeLine(line)
 }
 
 func (u *UI) shutdown() {
@@ -273,4 +286,156 @@ func centerLine(line string, width int) string {
 		pad = 0
 	}
 	return strings.Repeat(" ", pad) + trimmed
+}
+
+func (u *UI) formatProgressLine(ts string, ps *events.ProgressState, snapshot progressSnapshot, percent float64, done bool, now time.Time) string {
+	path := snapshot.path
+	if path == "" && ps != nil {
+		if ps.Path != "" {
+			path = ps.Path
+		} else if ps.Label != "" {
+			path = ps.Label
+		} else {
+			path = ps.ID
+		}
+	}
+	if path == "" {
+		path = "(unknown)"
+	}
+	pathSegment := u.colorizePath(path)
+	icon := progressIcon(snapshot.direction, snapshot.kind)
+	if icon != "" {
+		pathSegment = icon + " " + pathSegment
+	}
+	circle := progressCircle(percent, done)
+	percentSegment := formatPercent(percent, done)
+	statusSegment := u.progressStatus(snapshot.started, percent, done, now)
+	peerSegment := u.progressPeer(snapshot.direction, snapshot.peer)
+	return fmt.Sprintf("%s[%s]%s %s %s %s%s%s", colorMuted, ts, colorReset, pathSegment, circle, percentSegment, statusSegment, peerSegment)
+}
+
+func (u *UI) colorizePath(path string) string {
+	clean := path
+	if u.homeDir != "" && strings.HasPrefix(path, u.homeDir) {
+		suffix := strings.TrimPrefix(path, u.homeDir)
+		suffix = strings.TrimPrefix(suffix, string(os.PathSeparator))
+		if suffix == "" {
+			clean = "~"
+		} else {
+			clean = "~" + string(os.PathSeparator) + suffix
+		}
+	}
+	return colorPrimary + clean + colorReset
+}
+
+func progressIcon(direction, kind string) string {
+	switch kind {
+	case "folder":
+		if strings.EqualFold(direction, "receive") {
+			return "🗃️"
+		}
+		return "🗂️"
+	case "file":
+		if strings.EqualFold(direction, "receive") {
+			return "📥"
+		}
+		return "📤"
+	default:
+		if strings.EqualFold(direction, "receive") {
+			return "⬇"
+		}
+		return "⬆"
+	}
+}
+
+func progressCircle(percent float64, done bool) string {
+	const segments = 10
+	filled := int(math.Round(percent / 100 * segments))
+	if filled < 0 {
+		filled = 0
+	}
+	if filled > segments {
+		filled = segments
+	}
+	var builder strings.Builder
+	builder.WriteString("⟨")
+	if filled > 0 {
+		color := colorPrimary
+		if done {
+			color = colorSuccess
+		}
+		builder.WriteString(color)
+		builder.WriteString(strings.Repeat("●", filled))
+		builder.WriteString(colorReset)
+	}
+	if segments-filled > 0 {
+		builder.WriteString(colorMuted)
+		builder.WriteString(strings.Repeat("○", segments-filled))
+		builder.WriteString(colorReset)
+	}
+	builder.WriteString("⟩")
+	return builder.String()
+}
+
+func formatPercent(percent float64, done bool) string {
+	color := colorPrimary
+	if done {
+		color = colorSuccess
+	}
+	return fmt.Sprintf("%s%5.1f%%%s", color, percent, colorReset)
+}
+
+func (u *UI) progressStatus(start time.Time, percent float64, done bool, now time.Time) string {
+	if done {
+		if start.IsZero() {
+			return fmt.Sprintf(" %sCompleted%s", colorSuccess, colorReset)
+		}
+		return fmt.Sprintf(" %sCompleted%s in %s", colorSuccess, colorReset, formatDuration(now.Sub(start)))
+	}
+	eta := formatETA(start, now, percent)
+	return fmt.Sprintf(" %sETA%s %s%s%s", colorMuted, colorReset, colorPrimary, eta, colorReset)
+}
+
+func (u *UI) progressPeer(direction, peer string) string {
+	if strings.TrimSpace(peer) == "" {
+		return ""
+	}
+	arrow := "➜"
+	if strings.EqualFold(direction, "receive") {
+		arrow = "⬅"
+	}
+	return fmt.Sprintf(" %s%s%s %s%s%s", colorMuted, arrow, colorReset, colorPrimary, peer, colorReset)
+}
+
+func formatETA(start time.Time, now time.Time, percent float64) string {
+	progress := percent / 100
+	if progress <= 0 || start.IsZero() {
+		return "--:--"
+	}
+	elapsed := now.Sub(start)
+	if elapsed <= 0 {
+		return "--:--"
+	}
+	remaining := time.Duration(float64(elapsed) * (1 - progress) / progress)
+	if remaining < 0 {
+		remaining = 0
+	}
+	return formatDuration(remaining)
+}
+
+func formatDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	if d >= 24*time.Hour {
+		days := int(d / (24 * time.Hour))
+		return fmt.Sprintf("%dd", days)
+	}
+	hours := int(d / time.Hour)
+	minutes := int(d/time.Minute) % 60
+	seconds := int(d/time.Second) % 60
+	if hours > 0 {
+		return fmt.Sprintf("%d:%02d:%02d", hours, minutes, seconds)
+	}
+	return fmt.Sprintf("%02d:%02d", minutes, seconds)
 }

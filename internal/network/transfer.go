@@ -43,6 +43,15 @@ type envelope struct {
 	HMAC      string `json:"hmac"`
 }
 
+type progressContext struct {
+	id        string
+	label     string
+	path      string
+	peer      string
+	direction string
+	kind      string
+}
+
 // TransferService manages TCP message and payload transfers.
 type TransferService struct {
 	cfg       *config.Config
@@ -182,9 +191,15 @@ func (t *TransferService) SendFile(peer *Peer, path string) error {
 		Checksum:  checksum,
 	}
 	stream := func(writer io.Writer) error {
-		id := fmt.Sprintf("file:%s", env.Name)
-		label := fmt.Sprintf("Sending %s", env.Name)
-		return t.copyWithProgress(writer, path, env.Size, id, label)
+		ctx := progressContext{
+			id:        fmt.Sprintf("file:%s", env.Name),
+			label:     fmt.Sprintf("Sending %s", env.Name),
+			path:      path,
+			peer:      formatPeer(peer),
+			direction: "send",
+			kind:      kindFile,
+		}
+		return t.copyWithProgress(writer, path, env.Size, ctx)
 	}
 	if err := t.sendEnvelope(peer, env, stream); err != nil {
 		return err
@@ -226,9 +241,15 @@ func (t *TransferService) SendFolder(peer *Peer, dir string) error {
 		Checksum:  checksum,
 	}
 	stream := func(writer io.Writer) error {
-		id := fmt.Sprintf("folder:%s", env.Name)
-		label := fmt.Sprintf("Sending %s", env.Name)
-		return t.copyWithProgress(writer, archivePath, env.Size, id, label)
+		ctx := progressContext{
+			id:        fmt.Sprintf("folder:%s", env.Name),
+			label:     fmt.Sprintf("Sending %s", env.Name),
+			path:      dir,
+			peer:      formatPeer(peer),
+			direction: "send",
+			kind:      kindFolder,
+		}
+		return t.copyWithProgress(writer, archivePath, env.Size, ctx)
 	}
 	if err := t.sendEnvelope(peer, env, stream); err != nil {
 		return err
@@ -312,7 +333,15 @@ func (t *TransferService) receiveFile(conn net.Conn, env *envelope) error {
 	hasher := sha256.New()
 	progressID := fmt.Sprintf("recv:%s", env.Name)
 	label := fmt.Sprintf("Receiving %s", env.Name)
-	if err := t.readWithProgress(conn, file, env.Size, hasher, progressID, label); err != nil {
+	ctx := progressContext{
+		id:        progressID,
+		label:     label,
+		path:      destPath,
+		peer:      formatRemote(env.From, env.FromIP),
+		direction: "receive",
+		kind:      kindFile,
+	}
+	if err := t.readWithProgress(conn, file, env.Size, hasher, ctx); err != nil {
 		return err
 	}
 	receivedChecksum := hex.EncodeToString(hasher.Sum(nil))
@@ -337,7 +366,17 @@ func (t *TransferService) receiveFolder(conn net.Conn, env *envelope) error {
 	hasher := sha256.New()
 	progressID := fmt.Sprintf("recv:%s", env.Name)
 	label := fmt.Sprintf("Receiving %s", env.Name)
-	if err := t.readWithProgress(conn, file, env.Size, hasher, progressID, label); err != nil {
+	destDirName := strings.TrimSuffix(env.Name, ".zip")
+	displayPath := filepath.Join(t.cfg.ReceivedFoldersDir, destDirName)
+	ctx := progressContext{
+		id:        progressID,
+		label:     label,
+		path:      displayPath,
+		peer:      formatRemote(env.From, env.FromIP),
+		direction: "receive",
+		kind:      kindFolder,
+	}
+	if err := t.readWithProgress(conn, file, env.Size, hasher, ctx); err != nil {
 		return err
 	}
 	receivedChecksum := hex.EncodeToString(hasher.Sum(nil))
@@ -345,7 +384,7 @@ func (t *TransferService) receiveFolder(conn net.Conn, env *envelope) error {
 		t.emit(events.Event{Type: events.Error, Title: "Checksum mismatch", Message: env.Name, From: env.From, Timestamp: time.Now(), Path: tempPath})
 		return errors.New("checksum mismatch")
 	}
-	destDir := uniquePath(filepath.Join(t.cfg.ReceivedFoldersDir, strings.TrimSuffix(env.Name, ".zip")))
+	destDir := uniquePath(displayPath)
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return err
 	}
@@ -356,14 +395,15 @@ func (t *TransferService) receiveFolder(conn net.Conn, env *envelope) error {
 	return t.history.AppendTransfer(env.From, t.localUser, destDir, env.Size, kindFolder)
 }
 
-func (t *TransferService) copyWithProgress(writer io.Writer, path string, total int64, id, label string) error {
-	file, err := os.Open(path)
+func (t *TransferService) copyWithProgress(writer io.Writer, sourcePath string, total int64, ctx progressContext) error {
+	file, err := os.Open(sourcePath)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 	buf := make([]byte, 64*1024)
 	var sent int64
+	started := time.Now()
 	for {
 		n, err := file.Read(buf)
 		if n > 0 {
@@ -371,7 +411,18 @@ func (t *TransferService) copyWithProgress(writer io.Writer, path string, total 
 				return err
 			}
 			sent += int64(n)
-			t.emit(events.Event{Type: events.Progress, Progress: &events.ProgressState{ID: id, Label: label, Current: sent, Total: total}})
+			t.emit(events.Event{Type: events.Progress, Progress: &events.ProgressState{
+				ID:        ctx.id,
+				Label:     ctx.label,
+				Path:      ctx.path,
+				Peer:      ctx.peer,
+				Direction: ctx.direction,
+				Kind:      ctx.kind,
+				Current:   sent,
+				Total:     total,
+				StartedAt: started,
+				UpdatedAt: time.Now(),
+			}})
 		}
 		if err == io.EOF {
 			break
@@ -380,14 +431,27 @@ func (t *TransferService) copyWithProgress(writer io.Writer, path string, total 
 			return err
 		}
 	}
-	t.emit(events.Event{Type: events.Progress, Progress: &events.ProgressState{ID: id, Label: label, Current: total, Total: total, Done: true}})
+	t.emit(events.Event{Type: events.Progress, Progress: &events.ProgressState{
+		ID:        ctx.id,
+		Label:     ctx.label,
+		Path:      ctx.path,
+		Peer:      ctx.peer,
+		Direction: ctx.direction,
+		Kind:      ctx.kind,
+		Current:   total,
+		Total:     total,
+		StartedAt: started,
+		UpdatedAt: time.Now(),
+		Done:      true,
+	}})
 	return nil
 }
 
-func (t *TransferService) readWithProgress(reader io.Reader, writer io.Writer, total int64, hash io.Writer, id, label string) error {
+func (t *TransferService) readWithProgress(reader io.Reader, writer io.Writer, total int64, hash io.Writer, ctx progressContext) error {
 	buf := make([]byte, 64*1024)
 	var received int64
 	multiWriter := io.MultiWriter(writer, hash)
+	started := time.Now()
 	for received < total {
 		remaining := total - received
 		chunk := buf
@@ -402,9 +466,32 @@ func (t *TransferService) readWithProgress(reader io.Reader, writer io.Writer, t
 			return err
 		}
 		received += int64(n)
-		t.emit(events.Event{Type: events.Progress, Progress: &events.ProgressState{ID: id, Label: label, Current: received, Total: total}})
+		t.emit(events.Event{Type: events.Progress, Progress: &events.ProgressState{
+			ID:        ctx.id,
+			Label:     ctx.label,
+			Path:      ctx.path,
+			Peer:      ctx.peer,
+			Direction: ctx.direction,
+			Kind:      ctx.kind,
+			Current:   received,
+			Total:     total,
+			StartedAt: started,
+			UpdatedAt: time.Now(),
+		}})
 	}
-	t.emit(events.Event{Type: events.Progress, Progress: &events.ProgressState{ID: id, Label: label, Current: total, Total: total, Done: true}})
+	t.emit(events.Event{Type: events.Progress, Progress: &events.ProgressState{
+		ID:        ctx.id,
+		Label:     ctx.label,
+		Path:      ctx.path,
+		Peer:      ctx.peer,
+		Direction: ctx.direction,
+		Kind:      ctx.kind,
+		Current:   total,
+		Total:     total,
+		StartedAt: started,
+		UpdatedAt: time.Now(),
+		Done:      true,
+	}})
 	return nil
 }
 
@@ -453,6 +540,32 @@ func readEnvelope(conn net.Conn) (*envelope, error) {
 		return nil, err
 	}
 	return &env, nil
+}
+
+func formatPeer(peer *Peer) string {
+	if peer == nil {
+		return ""
+	}
+	if peer.Username != "" {
+		return fmt.Sprintf("%s@%s:%d", peer.Username, peer.IP, peer.Port)
+	}
+	if peer.IP != "" && peer.Port != 0 {
+		return fmt.Sprintf("%s:%d", peer.IP, peer.Port)
+	}
+	return peer.IP
+}
+
+func formatRemote(name, ip string) string {
+	trimmedName := strings.TrimSpace(name)
+	trimmedIP := strings.TrimSpace(ip)
+	switch {
+	case trimmedName != "" && trimmedIP != "":
+		return fmt.Sprintf("%s@%s", trimmedName, trimmedIP)
+	case trimmedIP != "":
+		return trimmedIP
+	default:
+		return trimmedName
+	}
 }
 
 func fileChecksum(path string) (string, error) {
