@@ -18,9 +18,14 @@ import (
 )
 
 func main() {
-	if versionRequested(os.Args[1:]) {
+	args := os.Args[1:]
+	if isVersionQuery(args) {
 		fmt.Println(version.Version)
 		return
+	}
+	if len(args) > 0 {
+		fmt.Fprintln(os.Stderr, "bonjou does not accept arguments. Run `bonjou --version` to check the version.")
+		os.Exit(1)
 	}
 
 	cfg, err := config.Load()
@@ -80,14 +85,14 @@ func main() {
 	sess.Close()
 }
 
-func versionRequested(args []string) bool {
-	for _, arg := range args {
-		switch arg {
-		case "--version", "-v", "-V":
-			return true
-		case "--":
-			return false
-		}
+func isVersionQuery(args []string) bool {
+	if len(args) != 1 {
+		return false
 	}
-	return false
+	switch args[0] {
+	case "--version", "-v", "-V":
+		return true
+	default:
+		return false
+	}
 }

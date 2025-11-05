@@ -24,7 +24,16 @@ const (
 	colorMuted          = "\033[90m"
 	minProgressStep     = 5.0
 	minProgressInterval = 750 * time.Millisecond
+	bannerWidth         = 80
 )
+
+var welcomeBanner = []string{
+	` ____                      _               `,
+	`| __ )  ___  _ __ ___  ___| |_ _   _ ___   `,
+	`|  _ \ / _ \| '__/ _ \/ __| __| | | / __|  `,
+	`| |_) | (_) | | |  __/\__ \ |_| |_| \__ \  `,
+	`|____/ \___/|_|  \___||___/\__|\__,_|___/  `,
+}
 
 type progressSnapshot struct {
 	percent   float64
@@ -141,6 +150,16 @@ func (u *UI) renderEvent(evt events.Event) {
 }
 
 func (u *UI) printWelcome() {
+	for _, line := range welcomeBanner {
+		u.writeLine(colorPrimary + centerLine(line, bannerWidth) + colorReset)
+	}
+	tagline := "Terminal LAN chat & transfers like a boss."
+	repo := "https://github.com/hamzaabdulwahab/bonjou-terminal"
+	credit := "[with <3 by @hamzaabdulwahab]"
+	u.writeLine(colorSuccess + centerLine(tagline, bannerWidth) + colorReset)
+	u.writeLine(colorMuted + centerLine(repo, bannerWidth) + colorReset)
+	u.writeLine(colorMuted + centerLine(credit, bannerWidth) + colorReset)
+	u.writeLine("")
 	u.writeLine(fmt.Sprintf("%s🌐 Welcome to Bonjou v%s%s", colorPrimary, version.Version, colorReset))
 	u.writeLine(fmt.Sprintf("%s👤 User:%s %s | IP: %s", colorMuted, colorReset, u.session.Config.Username, u.session.LocalIP))
 	u.writeLine(fmt.Sprintf("%s📡 LAN:%s Connected", colorMuted, colorReset))
@@ -242,4 +261,16 @@ func safe(in string) string {
 		return "(unknown)"
 	}
 	return in
+}
+
+func centerLine(line string, width int) string {
+	trimmed := strings.TrimRight(line, "\n")
+	if len(trimmed) >= width {
+		return trimmed
+	}
+	pad := (width - len(trimmed)) / 2
+	if pad < 0 {
+		pad = 0
+	}
+	return strings.Repeat(" ", pad) + trimmed
 }
