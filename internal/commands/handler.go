@@ -406,19 +406,41 @@ func normalizePathArg(input string) (string, error) {
 }
 
 func helpText() string {
-	return strings.TrimSpace(`Available commands:
-@send <user/ip> <message>
-@file <user/ip> <path>
-@folder <user/ip> <dir>
-@multi <u1,u2,...> <msg|path>
-@broadcast <message>
-@users
-@whoami
-@history
-@setpath <dir>
-@status
-@help
-@update
-@clear
-@exit`)
+	return strings.TrimSpace(`Bonjou command cheat-sheet
+
+Messaging
+	@send <user/ip> <message>
+		DM a single peer by username or IP address.
+	@multi <user1,user2,...> <message|path>
+		Reach a list of peers; message text or file/folder path accepted.
+	@broadcast <message>
+		Send a quick text announcement to every discovered peer.
+
+File transfer
+	@file <user/ip> <path>
+		Share one file; accepts quotes and ~ expansion.
+	@folder <user/ip> <dir>
+		Stream a directory; useful for project handoffs.
+	@history
+		Show recent sends, receives, and system notices.
+
+Discovery & status
+	@users
+		List online peers with IP, port, and last-seen time.
+	@whoami
+		Display your username, LAN IP, and listen port.
+	@status
+		Overview of discovery health and receive directories.
+
+Workspace tools
+	@setpath <dir>
+		Choose where incoming files and folders are stored.
+	@clear [history]
+		Clear the screen; add "history" to wipe saved history.
+	@update
+		Execute local updater script if present.
+	@help
+		Open this guide.
+	@exit
+		Quit Bonjou.`)
 }

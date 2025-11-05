@@ -28,11 +28,11 @@ const (
 )
 
 var welcomeBanner = []string{
-	` ____                      _               `,
-	`| __ )  ___  _ __ ___  ___| |_ _   _ ___   `,
-	`|  _ \ / _ \| '__/ _ \/ __| __| | | / __|  `,
-	`| |_) | (_) | | |  __/\__ \ |_| |_| \__ \  `,
-	`|____/ \___/|_|  \___||___/\__|\__,_|___/  `,
+	` ____    ___    _   _       _     ___    _   _ `,
+	`| __ )  / _ \  | \ | |     | |   / _ \  | | | |`,
+	`|  _ \ | | | | |  \| |  _  | |  | | | | | | | |`,
+	`| |_) || |_| | | |\  | | |_| | | |_| | | |_| |`,
+	`|____/  \___/  |_| \_|  \___/   \___/   \___/ `,
 }
 
 type progressSnapshot struct {
@@ -155,7 +155,7 @@ func (u *UI) printWelcome() {
 	}
 	tagline := "Terminal LAN chat & transfers like a boss."
 	repo := "https://github.com/hamzaabdulwahab/bonjou-terminal"
-	credit := "[with <3 by @hamzaabdulwahab]"
+	credit := "[with ❤️ by @hamzaabdulwahab]"
 	u.writeLine(colorSuccess + centerLine(tagline, bannerWidth) + colorReset)
 	u.writeLine(colorMuted + centerLine(repo, bannerWidth) + colorReset)
 	u.writeLine(colorMuted + centerLine(credit, bannerWidth) + colorReset)
