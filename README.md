@@ -128,6 +128,9 @@ All interactions rely on `@commands`. See [HELP.md](HELP.md) for the complete re
 @history
 ```
 
+✳️ Tip: wait for peers to appear in `@users` before targeting them by username or IP. Discovery carries
+the credentials needed for secure message verification.
+
 Received files arrive under:
 
 ```

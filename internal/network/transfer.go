@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -48,6 +49,7 @@ type TransferService struct {
 	logger    *logger.Logger
 	history   *history.Manager
 	events    chan<- events.Event
+	discovery *DiscoveryService
 	listener  net.Listener
 	stop      chan struct{}
 	stopOnce  sync.Once
@@ -56,13 +58,14 @@ type TransferService struct {
 	localIP   string
 }
 
-func NewTransferService(cfg *config.Config, logger *logger.Logger, history *history.Manager, events chan<- events.Event) *TransferService {
+func NewTransferService(cfg *config.Config, logger *logger.Logger, history *history.Manager, events chan<- events.Event, discovery *DiscoveryService) *TransferService {
 	return &TransferService{
-		cfg:     cfg,
-		logger:  logger,
-		history: history,
-		events:  events,
-		stop:    make(chan struct{}),
+		cfg:       cfg,
+		logger:    logger,
+		history:   history,
+		events:    events,
+		discovery: discovery,
+		stop:      make(chan struct{}),
 	}
 }
 
@@ -233,7 +236,11 @@ func (t *TransferService) SendFolder(peer *Peer, dir string) error {
 }
 
 func (t *TransferService) sendEnvelope(peer *Peer, env *envelope, writer func(io.Writer) error) error {
-	env.HMAC = t.signEnvelope(env)
+	if peer.Secret == "" {
+		return errors.New("peer secret unknown; ensure peer was discovered")
+	}
+	key := t.sharedKey(peer.Secret)
+	env.HMAC = t.signEnvelope(env, key)
 	address := net.JoinHostPort(peer.IP, fmt.Sprintf("%d", peer.Port))
 	conn, err := net.DialTimeout("tcp", address, 5*time.Second)
 	if err != nil {
@@ -251,8 +258,8 @@ func (t *TransferService) sendEnvelope(peer *Peer, env *envelope, writer func(io
 	return nil
 }
 
-func (t *TransferService) signEnvelope(env *envelope) string {
-	mac := hmac.New(sha256.New, []byte(t.cfg.Secret))
+func (t *TransferService) signEnvelope(env *envelope, key []byte) string {
+	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(env.Kind))
 	mac.Write([]byte(env.From))
 	mac.Write([]byte(env.FromIP))
@@ -270,7 +277,13 @@ func (t *TransferService) signEnvelope(env *envelope) string {
 }
 
 func (t *TransferService) verifyEnvelope(env *envelope) bool {
-	expected := t.signEnvelope(env)
+	secret, ok := t.discovery.SharedSecret(env.From, env.FromIP)
+	if !ok {
+		t.logger.Error("no shared secret for peer %s (%s)", env.From, env.FromIP)
+		return false
+	}
+	key := t.sharedKey(secret)
+	expected := t.signEnvelope(env, key)
 	expectedBytes, err1 := hex.DecodeString(expected)
 	providedBytes, err2 := hex.DecodeString(env.HMAC)
 	if err1 != nil || err2 != nil {
@@ -393,6 +406,13 @@ func (t *TransferService) emit(evt events.Event) {
 	case t.events <- evt:
 	default:
 	}
+}
+
+func (t *TransferService) sharedKey(peerSecret string) []byte {
+	parts := []string{t.cfg.Secret, peerSecret}
+	sort.Strings(parts)
+	sum := sha256.Sum256([]byte(parts[0] + ":" + parts[1]))
+	return sum[:]
 }
 
 func writeEnvelope(conn net.Conn, env *envelope) error {

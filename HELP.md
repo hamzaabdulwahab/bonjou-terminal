@@ -14,7 +14,7 @@ Bonjou runs entirely from an interactive prompt. Every action is triggered with 
 
 ## Messaging
 
-- `@send <user|ip> <message>` – send a plain text message to the specified user or IPv4 address.
+- `@send <user|ip> <message>` – send a plain text message to the specified user or IPv4 address (the peer must be visible in `@users` so Bonjou knows its shared secret).
 - `@multi <user1,user2,...> <message>` – deliver a text message (or file/folder, see below) to multiple recipients.
 - `@broadcast <message>` – send a text message to every discovered peer.
 

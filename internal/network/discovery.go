@@ -17,6 +17,7 @@ type Peer struct {
 	IP       string
 	Port     int
 	LastSeen time.Time
+	Secret   string
 }
 
 type announcement struct {
@@ -24,6 +25,7 @@ type announcement struct {
 	IP        string `json:"ip"`
 	Port      int    `json:"port"`
 	Timestamp int64  `json:"ts"`
+	Secret    string `json:"secret"`
 }
 
 // DiscoveryService handles LAN peer discovery over UDP broadcasts.
@@ -86,7 +88,9 @@ func (d *DiscoveryService) ListPeers() []Peer {
 			delete(d.peers, key)
 			continue
 		}
-		out = append(out, *peer)
+		clone := *peer
+		clone.Secret = ""
+		out = append(out, clone)
 	}
 	return out
 }
@@ -97,14 +101,37 @@ func (d *DiscoveryService) Resolve(target string) (*Peer, error) {
 	defer d.mu.RUnlock()
 	// direct IP match first
 	if peer, ok := d.peers[target]; ok {
-		return &Peer{Username: peer.Username, IP: peer.IP, Port: peer.Port, LastSeen: peer.LastSeen}, nil
+		clone := *peer
+		return &clone, nil
 	}
 	for _, peer := range d.peers {
 		if peer.Username == target {
-			return &Peer{Username: peer.Username, IP: peer.IP, Port: peer.Port, LastSeen: peer.LastSeen}, nil
+			clone := *peer
+			return &clone, nil
 		}
 	}
 	return nil, errors.New("peer not found")
+}
+
+// SharedSecret retrieves the most recent secret advertised by a peer.
+func (d *DiscoveryService) SharedSecret(username, ip string) (string, bool) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if ip != "" {
+		if peer, ok := d.peers[ip]; ok {
+			if peer.Secret != "" {
+				return peer.Secret, true
+			}
+		}
+	}
+	if username != "" {
+		for _, peer := range d.peers {
+			if peer.Username == username && peer.Secret != "" {
+				return peer.Secret, true
+			}
+		}
+	}
+	return "", false
 }
 
 func (d *DiscoveryService) listenLoop() {
@@ -140,7 +167,7 @@ func (d *DiscoveryService) listenLoop() {
 		if ann.IP == d.localIP && ann.Port == d.localPort {
 			continue
 		}
-		peer := &Peer{Username: ann.Username, IP: ann.IP, Port: ann.Port, LastSeen: time.Now()}
+		peer := &Peer{Username: ann.Username, IP: ann.IP, Port: ann.Port, LastSeen: time.Now(), Secret: ann.Secret}
 		d.mu.Lock()
 		d.peers[peer.IP] = peer
 		d.mu.Unlock()
@@ -153,7 +180,7 @@ func (d *DiscoveryService) announceLoop() {
 	defer ticker.Stop()
 	broadcastAddr := &net.UDPAddr{IP: net.IPv4bcast, Port: d.cfg.DiscoveryPort}
 	payload := func() []byte {
-		ann := announcement{Username: d.localUser, IP: d.localIP, Port: d.localPort, Timestamp: time.Now().Unix()}
+		ann := announcement{Username: d.localUser, IP: d.localIP, Port: d.localPort, Timestamp: time.Now().Unix(), Secret: d.cfg.Secret}
 		data, _ := json.Marshal(ann)
 		return data
 	}

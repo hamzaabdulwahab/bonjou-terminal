@@ -339,7 +339,11 @@ func (h *Handler) resolvePeer(target string) (*network.Peer, error) {
 		return nil, errors.New("empty target")
 	}
 	if ip := net.ParseIP(target); ip != nil {
-		return &network.Peer{Username: target, IP: ip.String(), Port: h.session.Config.ListenPort, LastSeen: time.Now()}, nil
+		peer, err := h.session.Discovery.Resolve(ip.String())
+		if err != nil {
+			return nil, fmt.Errorf("peer %s not discovered", target)
+		}
+		return peer, nil
 	}
 	peer, err := h.session.Discovery.Resolve(target)
 	if err != nil {

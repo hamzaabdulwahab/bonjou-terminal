@@ -39,13 +39,14 @@ func main() {
 		ip = "127.0.0.1"
 	}
 
-	transfer := network.NewTransferService(cfg, log, hist, eventStream)
+	discovery := network.NewDiscoveryService(cfg, log)
+
+	transfer := network.NewTransferService(cfg, log, hist, eventStream, discovery)
 	if err := transfer.Start(cfg.Username, ip); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to start transfer service: %v\n", err)
 		os.Exit(1)
 	}
 
-	discovery := network.NewDiscoveryService(cfg, log)
 	if err := discovery.Start(cfg.Username, ip, cfg.ListenPort); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to start discovery service: %v\n", err)
 		os.Exit(1)
