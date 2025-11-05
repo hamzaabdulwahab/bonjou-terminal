@@ -234,7 +234,7 @@ func (t *TransferService) SendFolder(peer *Peer, dir string) error {
 
 func (t *TransferService) sendEnvelope(peer *Peer, env *envelope, writer func(io.Writer) error) error {
 	env.HMAC = t.signEnvelope(env)
-	address := fmt.Sprintf("%s:%d", peer.IP, peer.Port)
+	address := net.JoinHostPort(peer.IP, fmt.Sprintf("%d", peer.Port))
 	conn, err := net.DialTimeout("tcp", address, 5*time.Second)
 	if err != nil {
 		return err

@@ -25,11 +25,23 @@ cd bonjou-terminal
 ./scripts/build.sh
 ```
 
-The script produces platform binaries in `dist/bin/`:
+The script cross-compiles Bonjou for Linux, macOS, and Windows. You can also
+directly compile individual targets into `bin/` with:
 
-- `bonjou-linux`
-- `bonjou-macos`
-- `bonjou.exe`
+```bash
+GOOS=linux   GOARCH=amd64 go build -o bin/bonjou-linux ./cmd/bonjou
+GOOS=darwin  GOARCH=amd64 go build -o bin/bonjou-macos ./cmd/bonjou
+GOOS=windows GOARCH=amd64 go build -o bin/bonjou.exe   ./cmd/bonjou
+```
+
+Compress each artifact before distribution:
+
+```bash
+cd bin
+tar -czf bonjou-linux.tar.gz  bonjou-linux
+tar -czf bonjou-macos.tar.gz  bonjou-macos
+zip bonjou-windows.zip bonjou.exe
+```
 
 ### Package for Distribution
 
@@ -47,25 +59,42 @@ Update the placeholder download URLs and SHA256 values in the manifests before p
 
 ### Install
 
+Pre-built packages are published on the
+[GitHub releases page](https://github.com/hamzaabdulwahab/bonjou-terminal/releases).
+
 #### Linux (.deb)
 
 ```bash
-sudo apt install ./dist/deb/bonjou_1.0.0_amd64.deb
+wget https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.0/bonjou_1.0.0_amd64.deb
+sudo dpkg -i bonjou_1.0.0_amd64.deb
+```
+
+If dependency errors occur, run `sudo apt -f install` and re-run the `dpkg -i`
+command. Launch with:
+
+```bash
+bonjou
 ```
 
 #### macOS (Homebrew)
 
 ```bash
-brew tap bonjou/local /path/to/bonjou-terminal/packaging/homebrew
+brew tap hamzaabdulwahab/bonjou https://github.com/hamzaabdulwahab/homebrew-bonjou
 brew install bonjou
 ```
+
+Homebrew downloads `bonjou-macos.tar.gz` from the release and installs the
+`bonjou` CLI into your PATH.
 
 #### Windows (Scoop)
 
 ```powershell
-scoop bucket add bonjou /path/to/packaging/scoop
+scoop bucket add bonjou https://github.com/hamzaabdulwahab/scoop-bonjou
 scoop install bonjou
 ```
+
+The Scoop bucket tracks the latest release zip and exposes `bonjou.exe` as a
+command.
 
 ### Offline / LAN Distribution
 
