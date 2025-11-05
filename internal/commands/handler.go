@@ -231,8 +231,13 @@ func (h *Handler) cmdBroadcast(message string) (Result, error) {
 	}
 	var errs []string
 	for _, peer := range peers {
-		if err := h.session.Transfer.SendMessage(&peer, message); err != nil {
+		resolved, err := h.session.Discovery.Resolve(peer.IP)
+		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", peerLabel(&peer), err))
+			continue
+		}
+		if err := h.session.Transfer.SendMessage(resolved, message); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", peerLabel(resolved), err))
 		}
 	}
 	if len(errs) > 0 {
@@ -257,9 +262,9 @@ func (h *Handler) cmdSetPath(arg string) (Result, error) {
 	if dir == "" {
 		return Result{Output: "Usage: @setpath <dir>"}, nil
 	}
-	if !filepath.IsAbs(dir) {
-		cwd, _ := os.Getwd()
-		dir = filepath.Join(cwd, dir)
+	dir, err := normalizePathArg(dir)
+	if err != nil {
+		return Result{}, err
 	}
 	cfg := h.session.Config
 	cfg.SaveDir = dir

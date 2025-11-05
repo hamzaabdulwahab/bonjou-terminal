@@ -17,13 +17,19 @@ import (
 )
 
 const (
-	colorReset      = "\033[0m"
-	colorPrimary    = "\033[36m"
-	colorSuccess    = "\033[32m"
-	colorError      = "\033[31m"
-	colorMuted      = "\033[90m"
-	minProgressStep = 5.0
+	colorReset          = "\033[0m"
+	colorPrimary        = "\033[36m"
+	colorSuccess        = "\033[32m"
+	colorError          = "\033[31m"
+	colorMuted          = "\033[90m"
+	minProgressStep     = 5.0
+	minProgressInterval = 750 * time.Millisecond
 )
+
+type progressSnapshot struct {
+	percent   float64
+	lastPrint time.Time
+}
 
 // UI drives the interactive terminal session.
 type UI struct {
@@ -31,7 +37,7 @@ type UI struct {
 	handler    *commands.Handler
 	rl         *readline.Instance
 	done       chan struct{}
-	progress   map[string]float64
+	progress   map[string]progressSnapshot
 	progressMu sync.Mutex
 	printMu    sync.Mutex
 }
@@ -56,7 +62,7 @@ func New(session *session.Session, handler *commands.Handler) (*UI, error) {
 		handler:  handler,
 		rl:       rl,
 		done:     make(chan struct{}),
-		progress: make(map[string]float64),
+		progress: make(map[string]progressSnapshot),
 	}, nil
 }
 
@@ -164,13 +170,39 @@ func (u *UI) renderProgress(evt events.Event, ts string) {
 	if label == "" {
 		label = evt.Progress.ID
 	}
+	now := time.Now()
 	u.progressMu.Lock()
-	prev, seen := u.progress[evt.Progress.ID]
-	shouldPrint := evt.Progress.Done || !seen || percent-prev >= minProgressStep || percent == 100
+	state, seen := u.progress[evt.Progress.ID]
+	shouldPrint := false
 	if evt.Progress.Done {
 		delete(u.progress, evt.Progress.ID)
-	} else if shouldPrint {
-		u.progress[evt.Progress.ID] = percent
+		shouldPrint = true
+	} else {
+		if percent >= 100 {
+			state.percent = percent
+			state.lastPrint = now
+			u.progress[evt.Progress.ID] = state
+			u.progressMu.Unlock()
+			return
+		}
+		if !seen {
+			state = progressSnapshot{percent: percent}
+			if percent >= minProgressStep {
+				shouldPrint = true
+				state.lastPrint = now
+			}
+			u.progress[evt.Progress.ID] = state
+		} else {
+			if percent-state.percent >= minProgressStep && (state.lastPrint.IsZero() || now.Sub(state.lastPrint) >= minProgressInterval) {
+				shouldPrint = true
+				state.percent = percent
+				state.lastPrint = now
+				u.progress[evt.Progress.ID] = state
+			} else {
+				state.percent = percent
+				u.progress[evt.Progress.ID] = state
+			}
+		}
 	}
 	u.progressMu.Unlock()
 	if !shouldPrint {
