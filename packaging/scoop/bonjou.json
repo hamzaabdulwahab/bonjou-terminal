@@ -6,7 +6,7 @@
   "architecture": {
     "64bit": {
       "url": "https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.1/bonjou-windows.zip",
-      "hash": "0fb29ce55953ff5606ba16a35b4fb5361fdba6eaac17500631d39c5fee372e5b",
+  "hash": "75182e9aa910153e645880ab1d125b80ef67eaea3b7ac82a2a311def5e63ca9f",
       "bin": "bonjou.exe"
     }
   },

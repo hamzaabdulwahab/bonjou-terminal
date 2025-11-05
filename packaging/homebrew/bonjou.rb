@@ -5,7 +5,7 @@ class Bonjou < Formula
 
   on_macos do
     url "https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.1/bonjou-macos.tar.gz"
-    sha256 "174f3918dea94982f7424d00f213d7598f0f9e0f41901f4f1c7ebc40fbac3606"
+    sha256 "5cdffec87ba807c8d43affe50a8a78df161bcda0f1851ee3727ec27d1c8bafc9"
   end
 
   def install
