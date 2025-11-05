@@ -52,29 +52,41 @@ type progressContext struct {
 	kind      string
 }
 
+type writeDeadlineSetter interface {
+	SetWriteDeadline(time.Time) error
+}
+
+type readDeadlineSetter interface {
+	SetReadDeadline(time.Time) error
+}
+
 // TransferService manages TCP message and payload transfers.
 type TransferService struct {
-	cfg       *config.Config
-	logger    *logger.Logger
-	history   *history.Manager
-	events    chan<- events.Event
-	discovery *DiscoveryService
-	listener  net.Listener
-	stop      chan struct{}
-	stopOnce  sync.Once
-	wait      sync.WaitGroup
-	localUser string
-	localIP   string
+	cfg          *config.Config
+	logger       *logger.Logger
+	history      *history.Manager
+	events       chan<- events.Event
+	discovery    *DiscoveryService
+	listener     net.Listener
+	stop         chan struct{}
+	stopOnce     sync.Once
+	wait         sync.WaitGroup
+	localUser    string
+	localIP      string
+	chunkSize    int
+	chunkTimeout time.Duration
 }
 
 func NewTransferService(cfg *config.Config, logger *logger.Logger, history *history.Manager, events chan<- events.Event, discovery *DiscoveryService) *TransferService {
 	return &TransferService{
-		cfg:       cfg,
-		logger:    logger,
-		history:   history,
-		events:    events,
-		discovery: discovery,
-		stop:      make(chan struct{}),
+		cfg:          cfg,
+		logger:       logger,
+		history:      history,
+		events:       events,
+		discovery:    discovery,
+		stop:         make(chan struct{}),
+		chunkSize:    cfg.ChunkSizeBytes(),
+		chunkTimeout: cfg.ChunkTimeout(),
 	}
 }
 
@@ -401,12 +413,27 @@ func (t *TransferService) copyWithProgress(writer io.Writer, sourcePath string, 
 		return err
 	}
 	defer file.Close()
-	buf := make([]byte, 64*1024)
+	chunkSize := t.chunkSize
+	if chunkSize <= 0 {
+		chunkSize = 64 * 1024
+	}
+	buf := make([]byte, chunkSize)
 	var sent int64
 	started := time.Now()
+	deadline := t.chunkTimeout
+	var setter writeDeadlineSetter
+	if deadline > 0 {
+		if s, ok := writer.(writeDeadlineSetter); ok {
+			setter = s
+			defer setter.SetWriteDeadline(time.Time{})
+		}
+	}
 	for {
 		n, err := file.Read(buf)
 		if n > 0 {
+			if setter != nil && deadline > 0 {
+				_ = setter.SetWriteDeadline(time.Now().Add(deadline))
+			}
 			if _, err := writer.Write(buf[:n]); err != nil {
 				return err
 			}
@@ -448,15 +475,30 @@ func (t *TransferService) copyWithProgress(writer io.Writer, sourcePath string, 
 }
 
 func (t *TransferService) readWithProgress(reader io.Reader, writer io.Writer, total int64, hash io.Writer, ctx progressContext) error {
-	buf := make([]byte, 64*1024)
+	chunkSize := t.chunkSize
+	if chunkSize <= 0 {
+		chunkSize = 64 * 1024
+	}
+	buf := make([]byte, chunkSize)
 	var received int64
 	multiWriter := io.MultiWriter(writer, hash)
 	started := time.Now()
+	deadline := t.chunkTimeout
+	var setter readDeadlineSetter
+	if deadline > 0 {
+		if s, ok := reader.(readDeadlineSetter); ok {
+			setter = s
+			defer setter.SetReadDeadline(time.Time{})
+		}
+	}
 	for received < total {
 		remaining := total - received
 		chunk := buf
 		if int64(len(chunk)) > remaining {
 			chunk = buf[:remaining]
+		}
+		if setter != nil && deadline > 0 {
+			_ = setter.SetReadDeadline(time.Now().Add(deadline))
 		}
 		n, err := io.ReadFull(reader, chunk)
 		if err != nil {

@@ -140,7 +140,7 @@ func (h *Handler) cmdFile(parts []string, args string) (Result, error) {
 	if err := h.session.Transfer.SendFile(peer, path); err != nil {
 		return Result{}, err
 	}
-	return Result{Output: fmt.Sprintf("Transferring file %s to %s", filepath.Base(path), peerLabel(peer))}, nil
+	return Result{}, nil
 }
 
 func (h *Handler) cmdFolder(parts []string, args string) (Result, error) {
@@ -167,7 +167,7 @@ func (h *Handler) cmdFolder(parts []string, args string) (Result, error) {
 	if err := h.session.Transfer.SendFolder(peer, path); err != nil {
 		return Result{}, err
 	}
-	return Result{Output: fmt.Sprintf("Transferring folder %s to %s", filepath.Base(path), peerLabel(peer))}, nil
+	return Result{}, nil
 }
 
 func (h *Handler) cmdMulti(parts []string, args string) (Result, error) {

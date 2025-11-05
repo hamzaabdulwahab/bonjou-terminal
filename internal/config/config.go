@@ -27,6 +27,8 @@ type Config struct {
 	ReceivedFoldersDir string `json:"received_folders_dir"`
 	Secret             string `json:"secret"`
 	LastUpdated        int64  `json:"last_updated"`
+	ChunkSize          int    `json:"chunk_size_bytes"`
+	ChunkTimeoutSecs   int    `json:"chunk_timeout_secs"`
 	configPath         string `json:"-"`
 }
 
@@ -83,6 +85,8 @@ func Default() *Config {
 		ReceivedFoldersDir: filepath.Join(base, "received", "folders"),
 		Secret:             secret,
 		LastUpdated:        time.Now().Unix(),
+		ChunkSize:          64 * 1024,
+		ChunkTimeoutSecs:   30,
 	}
 	cfg.populateDerived()
 	return cfg
@@ -106,6 +110,8 @@ func (c *Config) Save() error {
 		ReceivedFoldersDir string `json:"received_folders_dir"`
 		Secret             string `json:"secret"`
 		LastUpdated        int64  `json:"last_updated"`
+		ChunkSize          int    `json:"chunk_size_bytes"`
+		ChunkTimeoutSecs   int    `json:"chunk_timeout_secs"`
 	}{
 		Username:           c.Username,
 		ListenPort:         c.ListenPort,
@@ -117,6 +123,8 @@ func (c *Config) Save() error {
 		ReceivedFoldersDir: c.ReceivedFoldersDir,
 		Secret:             c.Secret,
 		LastUpdated:        c.LastUpdated,
+		ChunkSize:          c.ChunkSize,
+		ChunkTimeoutSecs:   c.ChunkTimeoutSecs,
 	}, "", "  ")
 	if err != nil {
 		return err
@@ -170,6 +178,24 @@ func (c *Config) populateDerived() {
 		base, _ := defaultBaseDir()
 		c.configPath = filepath.Join(base, configFileName)
 	}
+	if c.ChunkSize <= 0 {
+		c.ChunkSize = 64 * 1024
+	}
+	if c.ChunkSize < 4*1024 {
+		c.ChunkSize = 4 * 1024
+	}
+	if c.ChunkSize > 4*1024*1024 {
+		c.ChunkSize = 4 * 1024 * 1024
+	}
+	if c.ChunkTimeoutSecs <= 0 {
+		c.ChunkTimeoutSecs = 30
+	}
+	if c.ChunkTimeoutSecs < 5 {
+		c.ChunkTimeoutSecs = 5
+	}
+	if c.ChunkTimeoutSecs > 600 {
+		c.ChunkTimeoutSecs = 600
+	}
 }
 
 func randomHex(n int) string {
@@ -178,6 +204,28 @@ func randomHex(n int) string {
 		return ""
 	}
 	return hex.EncodeToString(buf)
+}
+
+// ChunkSizeBytes returns the normalized chunk size used for payload streaming.
+func (c *Config) ChunkSizeBytes() int {
+	if c == nil {
+		return 64 * 1024
+	}
+	if c.ChunkSize <= 0 {
+		return 64 * 1024
+	}
+	return c.ChunkSize
+}
+
+// ChunkTimeout returns the per-chunk IO timeout duration.
+func (c *Config) ChunkTimeout() time.Duration {
+	if c == nil {
+		return 30 * time.Second
+	}
+	if c.ChunkTimeoutSecs <= 0 {
+		return 30 * time.Second
+	}
+	return time.Duration(c.ChunkTimeoutSecs) * time.Second
 }
 
 func defaultBaseDir() (string, error) {
