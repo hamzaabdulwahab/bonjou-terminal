@@ -44,4 +44,5 @@ Transfers stream over TCP with integrity validation. Real-time progress updates 
 - Use usernames for readability; Bonjou maps usernames to IPs via LAN discovery.
 - To target a device directly, supply the IPv4 address (Bonjou assumes the default port 46321).
 - When transferring folders, ensure you have permission to read every file inside the directory tree.
+- Paths containing spaces can be wrapped in quotes. A leading `~` expands to your home directory.
 - History data can become large on long-lived hosts; clear it by deleting the log files or using `@clear` and removing them manually.

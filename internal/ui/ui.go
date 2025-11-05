@@ -10,6 +10,7 @@ import (
 	"github.com/hamzawahab/bonjou-terminal/internal/commands"
 	"github.com/hamzawahab/bonjou-terminal/internal/events"
 	"github.com/hamzawahab/bonjou-terminal/internal/session"
+	"github.com/hamzawahab/bonjou-terminal/internal/version"
 )
 
 const (
@@ -112,7 +113,7 @@ func (u *UI) renderEvent(evt events.Event) {
 }
 
 func (u *UI) printWelcome() {
-	header := fmt.Sprintf("%s🌐 Welcome to Bonjou v1.0%s", colorPrimary, colorReset)
+	header := fmt.Sprintf("%s🌐 Welcome to Bonjou v%s%s", colorPrimary, version.Version, colorReset)
 	user := fmt.Sprintf("%s👤 User:%s %s | IP: %s", colorMuted, colorReset, u.session.Config.Username, u.session.LocalIP)
 	lan := fmt.Sprintf("%s📡 LAN:%s Connected", colorMuted, colorReset)
 	fmt.Println(header)

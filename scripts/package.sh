@@ -5,7 +5,7 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 DIST_DIR="$ROOT_DIR/dist"
 BIN_DIR="$DIST_DIR/bin"
 DEB_WORK="$DIST_DIR/deb"
-VERSION="1.0.0"
+VERSION=$(tr -d ' \n\r' < "$ROOT_DIR/VERSION")
 
 "$ROOT_DIR/scripts/build.sh"
 

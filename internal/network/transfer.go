@@ -122,8 +122,10 @@ func (t *TransferService) handleConnection(conn net.Conn) error {
 	if err != nil {
 		return err
 	}
-	if !t.verifyEnvelope(env) {
-		return errors.New("invalid message signature")
+	if err := t.verifyEnvelope(env); err != nil {
+		t.logger.Error("verify envelope failed: %v", err)
+		t.emit(events.Event{Type: events.Error, Title: "Rejected incoming payload", Message: err.Error(), From: env.From, Timestamp: time.Now()})
+		return err
 	}
 	switch env.Kind {
 	case kindMessage:
@@ -276,20 +278,25 @@ func (t *TransferService) signEnvelope(env *envelope, key []byte) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-func (t *TransferService) verifyEnvelope(env *envelope) bool {
+func (t *TransferService) verifyEnvelope(env *envelope) error {
 	secret, ok := t.discovery.SharedSecret(env.From, env.FromIP)
-	if !ok {
-		t.logger.Error("no shared secret for peer %s (%s)", env.From, env.FromIP)
-		return false
+	if !ok || secret == "" {
+		return fmt.Errorf("discarded %s from %s (%s): peer not discovered yet", env.Kind, env.From, env.FromIP)
 	}
 	key := t.sharedKey(secret)
 	expected := t.signEnvelope(env, key)
-	expectedBytes, err1 := hex.DecodeString(expected)
-	providedBytes, err2 := hex.DecodeString(env.HMAC)
-	if err1 != nil || err2 != nil {
-		return false
+	expectedBytes, err := hex.DecodeString(expected)
+	if err != nil {
+		return fmt.Errorf("unable to compute signature for %s: %w", env.From, err)
 	}
-	return hmac.Equal(expectedBytes, providedBytes)
+	providedBytes, err := hex.DecodeString(env.HMAC)
+	if err != nil {
+		return fmt.Errorf("invalid signature data from %s: %w", env.From, err)
+	}
+	if !hmac.Equal(expectedBytes, providedBytes) {
+		return fmt.Errorf("discarded %s from %s (%s): signature mismatch", env.Kind, env.From, env.FromIP)
+	}
+	return nil
 }
 
 func (t *TransferService) receiveFile(conn net.Conn, env *envelope) error {

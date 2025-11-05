@@ -122,13 +122,9 @@ func (h *Handler) cmdFile(parts []string, args string) (Result, error) {
 	}
 	target := parts[1]
 	rawPath := strings.TrimSpace(strings.TrimPrefix(args, target))
-	path := strings.TrimSpace(rawPath)
-	if path == "" {
-		return Result{Output: "File path required."}, nil
-	}
-	if !filepath.IsAbs(path) {
-		cwd, _ := os.Getwd()
-		path = filepath.Join(cwd, path)
+	path, err := normalizePathArg(rawPath)
+	if err != nil {
+		return Result{}, err
 	}
 	info, err := os.Stat(path)
 	if err != nil {
@@ -153,13 +149,9 @@ func (h *Handler) cmdFolder(parts []string, args string) (Result, error) {
 	}
 	target := parts[1]
 	rawPath := strings.TrimSpace(strings.TrimPrefix(args, target))
-	path := strings.TrimSpace(rawPath)
-	if path == "" {
-		return Result{Output: "Folder path required."}, nil
-	}
-	if !filepath.IsAbs(path) {
-		cwd, _ := os.Getwd()
-		path = filepath.Join(cwd, path)
+	path, err := normalizePathArg(rawPath)
+	if err != nil {
+		return Result{}, err
 	}
 	info, err := os.Stat(path)
 	if err != nil {
@@ -189,13 +181,11 @@ func (h *Handler) cmdMulti(parts []string, args string) (Result, error) {
 	}
 	payloadPath := ""
 	payloadIsDir := false
-	if info, err := os.Stat(payload); err == nil {
-		if !filepath.IsAbs(payload) {
-			cwd, _ := os.Getwd()
-			payload = filepath.Join(cwd, payload)
+	if pathCandidate, err := normalizePathArg(payload); err == nil {
+		if info, statErr := os.Stat(pathCandidate); statErr == nil {
+			payloadPath = pathCandidate
+			payloadIsDir = info.IsDir()
 		}
-		payloadPath = payload
-		payloadIsDir = info.IsDir()
 	}
 	var errs []string
 	var success int
@@ -371,6 +361,43 @@ func runUpdateCandidate(path string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func normalizePathArg(input string) (string, error) {
+	path := strings.TrimSpace(input)
+	if path == "" {
+		return "", errors.New("empty path")
+	}
+	if len(path) >= 2 {
+		if (path[0] == '"' && path[len(path)-1] == '"') || (path[0] == '\'' && path[len(path)-1] == '\'') {
+			path = strings.TrimSpace(path[1 : len(path)-1])
+		}
+	}
+	if path == "" {
+		return "", errors.New("empty path")
+	}
+	if strings.HasPrefix(path, "~") {
+		if len(path) > 1 && path[1] != '/' && path[1] != '\\' {
+			return "", fmt.Errorf("unsupported home expansion for %s", path)
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		if path == "~" {
+			path = home
+		} else {
+			cleaned := strings.TrimPrefix(path, "~")
+			cleaned = strings.TrimPrefix(cleaned, "/")
+			cleaned = strings.TrimPrefix(cleaned, "\\")
+			path = filepath.Join(home, cleaned)
+		}
+	}
+	if !filepath.IsAbs(path) {
+		cwd, _ := os.Getwd()
+		path = filepath.Join(cwd, path)
+	}
+	return filepath.Clean(path), nil
 }
 
 func helpText() string {

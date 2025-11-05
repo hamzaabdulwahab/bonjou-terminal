@@ -51,7 +51,7 @@ zip bonjou-windows.zip bonjou.exe
 
 Outputs:
 
-- Debian package: `dist/deb/bonjou_1.0.0_amd64.deb`
+- Debian package: `dist/deb/bonjou_1.0.1_amd64.deb`
 - Homebrew formula: `dist/homebrew/bonjou.rb`
 - Scoop manifest: `dist/scoop/bonjou.json`
 
@@ -65,8 +65,8 @@ Pre-built packages are published on the
 #### Linux (.deb)
 
 ```bash
-wget https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.0/bonjou_1.0.0_amd64.deb
-sudo dpkg -i bonjou_1.0.0_amd64.deb
+wget https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.1/bonjou_1.0.1_amd64.deb
+sudo dpkg -i bonjou_1.0.1_amd64.deb
 ```
 
 If dependency errors occur, run `sudo apt -f install` and re-run the `dpkg -i`
@@ -86,6 +86,13 @@ brew install bonjou
 Homebrew downloads `bonjou-macos.tar.gz` from the release and installs the
 `bonjou` CLI into your PATH.
 
+Update to the latest release with:
+
+```bash
+brew update
+brew upgrade bonjou
+```
+
 #### Windows (Scoop)
 
 ```powershell
@@ -95,6 +102,13 @@ scoop install bonjou
 
 The Scoop bucket tracks the latest release zip and exposes `bonjou.exe` as a
 command.
+
+Upgrade with the latest manifest by running:
+
+```powershell
+scoop update
+scoop update bonjou
+```
 
 ### Offline / LAN Distribution
 
@@ -112,7 +126,7 @@ bonjou
 Opening banner:
 
 ```
-🌐 Welcome to Bonjou v1.0
+🌐 Welcome to Bonjou v1.0.1
 👤 User: <username> | IP: <ip>
 📡 LAN: Connected
 Type @help for commands.
@@ -128,8 +142,8 @@ All interactions rely on `@commands`. See [HELP.md](HELP.md) for the complete re
 @history
 ```
 
-✳️ Tip: wait for peers to appear in `@users` before targeting them by username or IP. Discovery carries
-the credentials needed for secure message verification.
+✳️ Tip: wait for peers to appear in `@users` before targeting them by username or IP, and make sure both
+devices run the same Bonjou version. Discovery carries the credentials needed for secure message verification.
 
 Received files arrive under:
 
@@ -139,6 +153,11 @@ Received files arrive under:
 ```
 
 Logs live in `~/.bonjou/logs`. Use `@setpath <dir>` to move incoming storage elsewhere.
+
+### Troubleshooting
+
+- If you see `Rejected incoming payload` errors, the receiving side has not discovered you yet or is running an older Bonjou build. Wait for the peer to appear in `@users` and ensure both machines are using v1.0.1 or newer.
+- `write: broken pipe` typically indicates the connection dropped mid-transfer; double-check both hosts are still connected to the LAN and re-send once discovery refreshes (announcements repeat every 5 seconds).
 
 ## Architecture Overview
 
