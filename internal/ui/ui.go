@@ -190,6 +190,9 @@ func (u *UI) renderProgress(evt events.Event, ts string) {
 	if ps == nil || ps.Total <= 0 {
 		return
 	}
+	if strings.EqualFold(ps.Direction, "receive") {
+		return
+	}
 	percent := float64(ps.Current) / float64(ps.Total) * 100
 	if percent < 0 {
 		percent = 0
