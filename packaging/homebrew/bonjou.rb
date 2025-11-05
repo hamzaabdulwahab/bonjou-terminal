@@ -1,11 +1,11 @@
 class Bonjou < Formula
   desc "Terminal-based LAN chat and transfer application"
   homepage "https://github.com/hamzawahab/bonjou-terminal"
-  version "1.0.1"
+  version "1.0.2"
 
   on_macos do
-    url "https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.1/bonjou-macos.tar.gz"
-    sha256 "5cdffec87ba807c8d43affe50a8a78df161bcda0f1851ee3727ec27d1c8bafc9"
+    url "https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.2/bonjou-macos.tar.gz"
+    sha256 "4b1d99132152a4a58e4ea4c1bddb1ac414902f2f360340f157dcc808c7afc6df"
   end
 
   def install

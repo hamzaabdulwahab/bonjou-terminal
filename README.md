@@ -6,6 +6,7 @@ Bonjou is a cross-platform, terminal-based LAN chat and transfer application wri
 
 - 🔌 Works entirely on LAN – no central server required.
 - 💬 Low-friction terminal UI with command-driven interactions.
+- ⌨️ Rich line editing with history, arrow keys, and familiar shortcuts (Ctrl+A/E/U, Home/End, etc.).
 - 📁 Fast file and folder transfer with automatic compression, checksums, and progress updates.
 - 📡 Peer discovery over UDP broadcasts; encrypted integrity checks over TCP for data transport.
 - 🗃️ Persistent logs and received files stored under `~/.bonjou/`.
@@ -51,7 +52,7 @@ zip bonjou-windows.zip bonjou.exe
 
 Outputs:
 
-- Debian package: `dist/deb/bonjou_1.0.1_amd64.deb`
+- Debian package: `dist/deb/bonjou_1.0.2_amd64.deb`
 - Homebrew formula: `dist/homebrew/bonjou.rb`
 - Scoop manifest: `dist/scoop/bonjou.json`
 
@@ -65,8 +66,8 @@ Pre-built packages are published on the
 #### Linux (.deb)
 
 ```bash
-wget https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.1/bonjou_1.0.1_amd64.deb
-sudo dpkg -i bonjou_1.0.1_amd64.deb
+wget https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.2/bonjou_1.0.2_amd64.deb
+sudo dpkg -i bonjou_1.0.2_amd64.deb
 ```
 
 If dependency errors occur, run `sudo apt -f install` and re-run the `dpkg -i`
@@ -123,10 +124,16 @@ Launch Bonjou after installation:
 bonjou
 ```
 
+Check the currently installed version without launching the UI:
+
+```bash
+bonjou --version
+```
+
 Opening banner:
 
 ```
-🌐 Welcome to Bonjou v1.0.1
+🌐 Welcome to Bonjou v1.0.2
 👤 User: <username> | IP: <ip>
 📡 LAN: Connected
 Type @help for commands.
@@ -144,6 +151,7 @@ All interactions rely on `@commands`. See [HELP.md](HELP.md) for the complete re
 
 ✳️ Tip: wait for peers to appear in `@users` before targeting them by username or IP, and make sure both
 devices run the same Bonjou version. Discovery carries the credentials needed for secure message verification.
+Progress indicators refresh roughly every 5% to keep the prompt readable during large transfers.
 
 Received files arrive under:
 
@@ -156,7 +164,7 @@ Logs live in `~/.bonjou/logs`. Use `@setpath <dir>` to move incoming storage els
 
 ### Troubleshooting
 
-- If you see `Rejected incoming payload` errors, the receiving side has not discovered you yet or is running an older Bonjou build. Wait for the peer to appear in `@users` and ensure both machines are using v1.0.1 or newer.
+- If you see `Rejected incoming payload` errors, the receiving side has not discovered you yet or is running an older Bonjou build. Wait for the peer to appear in `@users` and ensure both machines are using v1.0.2 or newer.
 - `write: broken pipe` typically indicates the connection dropped mid-transfer; double-check both hosts are still connected to the LAN and re-send once discovery refreshes (announcements repeat every 5 seconds).
 
 ## Architecture Overview

@@ -14,9 +14,15 @@ import (
 	"github.com/hamzawahab/bonjou-terminal/internal/network"
 	"github.com/hamzawahab/bonjou-terminal/internal/session"
 	"github.com/hamzawahab/bonjou-terminal/internal/ui"
+	"github.com/hamzawahab/bonjou-terminal/internal/version"
 )
 
 func main() {
+	if versionRequested(os.Args[1:]) {
+		fmt.Println(version.Version)
+		return
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
@@ -54,7 +60,12 @@ func main() {
 
 	sess := session.New(cfg, log, hist, discovery, transfer, eventStream, ip)
 	handler := commands.New(sess)
-	console := ui.New(sess, handler)
+	console, err := ui.New(sess, handler)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to initialise console: %v\n", err)
+		sess.Close()
+		os.Exit(1)
+	}
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
@@ -67,4 +78,16 @@ func main() {
 
 	console.Run()
 	sess.Close()
+}
+
+func versionRequested(args []string) bool {
+	for _, arg := range args {
+		switch arg {
+		case "--version", "-v", "-V":
+			return true
+		case "--":
+			return false
+		}
+	}
+	return false
 }
