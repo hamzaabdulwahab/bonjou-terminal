@@ -9,7 +9,7 @@ class Bonjou < Formula
   end
 
   def install
-    bin.install "bonjou"
+    bin.install "bonjou-macos" => "bonjou"
   end
 
   def caveats
