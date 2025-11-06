@@ -35,6 +35,10 @@ Transfers stream over TCP with integrity validation. Real-time progress updates 
 
 - `@setpath <dir>` – change the base directory used for incoming transfers. Bonjou creates `files/` and `folders/` subdirectories automatically and updates `config.json`.
 
+## Identity
+
+- `@setname <username>` – update the username you broadcast and persist it to `~/.bonjou/config.json`.
+
 ## Updating
 
 - `@update` – execute `bonjou-update` if available on `PATH`, or `~/.bonjou/update.sh` if present. Useful for offline / LAN-hosted repositories.

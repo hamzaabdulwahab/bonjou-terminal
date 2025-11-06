@@ -73,6 +73,7 @@ type TransferService struct {
 	wait         sync.WaitGroup
 	localUser    string
 	localIP      string
+	localMu      sync.RWMutex
 	chunkSize    int
 	chunkTimeout time.Duration
 }
@@ -97,8 +98,10 @@ func (t *TransferService) Start(username, ip string) error {
 		return err
 	}
 	t.listener = ln
+	t.localMu.Lock()
 	t.localUser = username
 	t.localIP = ip
+	t.localMu.Unlock()
 	t.wait.Add(1)
 	go t.acceptLoop()
 	return nil
@@ -164,10 +167,11 @@ func (t *TransferService) handleConnection(conn net.Conn) error {
 
 // SendMessage delivers plain text to a peer.
 func (t *TransferService) SendMessage(peer *Peer, message string) error {
+	localUser, localIP := t.identity()
 	env := &envelope{
 		Kind:      kindMessage,
-		From:      t.localUser,
-		FromIP:    t.localIP,
+		From:      localUser,
+		FromIP:    localIP,
 		To:        peer.Username,
 		Message:   message,
 		Timestamp: time.Now().Unix(),
@@ -176,11 +180,12 @@ func (t *TransferService) SendMessage(peer *Peer, message string) error {
 		return err
 	}
 	t.emit(events.Event{Type: events.MessageSent, Title: "Message sent", Message: message, To: peer.Username, Timestamp: time.Now()})
-	return t.history.AppendChat(t.localUser, peer.Username, message)
+	return t.history.AppendChat(localUser, peer.Username, message)
 }
 
 // SendFile streams a file to the peer.
 func (t *TransferService) SendFile(peer *Peer, path string) error {
+	localUser, localIP := t.identity()
 	info, err := os.Stat(path)
 	if err != nil {
 		return err
@@ -194,8 +199,8 @@ func (t *TransferService) SendFile(peer *Peer, path string) error {
 	}
 	env := &envelope{
 		Kind:      kindFile,
-		From:      t.localUser,
-		FromIP:    t.localIP,
+		From:      localUser,
+		FromIP:    localIP,
 		To:        peer.Username,
 		Name:      filepath.Base(path),
 		Size:      info.Size(),
@@ -217,11 +222,12 @@ func (t *TransferService) SendFile(peer *Peer, path string) error {
 		return err
 	}
 	t.emit(events.Event{Type: events.FileSent, Title: "File sent", Message: env.Name, To: peer.Username, Path: path, Size: env.Size, Timestamp: time.Now()})
-	return t.history.AppendTransfer(t.localUser, peer.Username, path, env.Size, kindFile)
+	return t.history.AppendTransfer(localUser, peer.Username, path, env.Size, kindFile)
 }
 
 // SendFolder compresses and shares a folder with the peer.
 func (t *TransferService) SendFolder(peer *Peer, dir string) error {
+	localUser, localIP := t.identity()
 	info, err := os.Stat(dir)
 	if err != nil {
 		return err
@@ -244,8 +250,8 @@ func (t *TransferService) SendFolder(peer *Peer, dir string) error {
 	}
 	env := &envelope{
 		Kind:      kindFolder,
-		From:      t.localUser,
-		FromIP:    t.localIP,
+		From:      localUser,
+		FromIP:    localIP,
 		To:        peer.Username,
 		Name:      filepath.Base(dir) + ".zip",
 		Size:      archiveInfo.Size(),
@@ -267,7 +273,7 @@ func (t *TransferService) SendFolder(peer *Peer, dir string) error {
 		return err
 	}
 	t.emit(events.Event{Type: events.FolderSent, Title: "Folder sent", Message: env.Name, To: peer.Username, Path: dir, Size: env.Size, Timestamp: time.Now()})
-	return t.history.AppendTransfer(t.localUser, peer.Username, dir, env.Size, kindFolder)
+	return t.history.AppendTransfer(localUser, peer.Username, dir, env.Size, kindFolder)
 }
 
 func (t *TransferService) sendEnvelope(peer *Peer, env *envelope, writer func(io.Writer) error) error {
@@ -362,7 +368,8 @@ func (t *TransferService) receiveFile(conn net.Conn, env *envelope) error {
 		return errors.New("checksum mismatch")
 	}
 	t.emit(events.Event{Type: events.FileReceived, Title: "File received", Message: env.Name, From: env.From, Path: destPath, Size: env.Size, Timestamp: time.Now()})
-	return t.history.AppendTransfer(env.From, t.localUser, destPath, env.Size, kindFile)
+	localUser, _ := t.identity()
+	return t.history.AppendTransfer(env.From, localUser, destPath, env.Size, kindFile)
 }
 
 func (t *TransferService) receiveFolder(conn net.Conn, env *envelope) error {
@@ -404,7 +411,8 @@ func (t *TransferService) receiveFolder(conn net.Conn, env *envelope) error {
 		return err
 	}
 	t.emit(events.Event{Type: events.FolderReceived, Title: "Folder received", Message: env.Name, From: env.From, Path: destDir, Size: env.Size, Timestamp: time.Now()})
-	return t.history.AppendTransfer(env.From, t.localUser, destDir, env.Size, kindFolder)
+	localUser, _ := t.identity()
+	return t.history.AppendTransfer(env.From, localUser, destDir, env.Size, kindFolder)
 }
 
 func (t *TransferService) copyWithProgress(writer io.Writer, sourcePath string, total int64, ctx progressContext) error {
@@ -542,6 +550,19 @@ func (t *TransferService) emit(evt events.Event) {
 	case t.events <- evt:
 	default:
 	}
+}
+
+func (t *TransferService) identity() (string, string) {
+	t.localMu.RLock()
+	defer t.localMu.RUnlock()
+	return t.localUser, t.localIP
+}
+
+// UpdateLocalUser swaps the local username used for outgoing transfers.
+func (t *TransferService) UpdateLocalUser(username string) {
+	t.localMu.Lock()
+	t.localUser = username
+	t.localMu.Unlock()
 }
 
 func (t *TransferService) sharedKey(peerSecret string) []byte {

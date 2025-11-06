@@ -65,6 +65,8 @@ func (h *Handler) Handle(input string) (Result, error) {
 		return h.cmdHistory()
 	case "setpath":
 		return h.cmdSetPath(args)
+	case "setname":
+		return h.cmdSetName(args)
 	case "status":
 		return h.cmdStatus()
 	case "update":
@@ -279,6 +281,40 @@ func (h *Handler) cmdSetPath(arg string) (Result, error) {
 	return Result{Output: fmt.Sprintf("Receive directory set to %s", dir)}, nil
 }
 
+func (h *Handler) cmdSetName(arg string) (Result, error) {
+	name := strings.TrimSpace(arg)
+	if name == "" {
+		return Result{Output: "Usage: @setname <username>"}, nil
+	}
+	if strings.ContainsAny(name, "\n\r") {
+		return Result{Output: "Username cannot contain newlines."}, nil
+	}
+	if len(name) > 64 {
+		return Result{Output: "Username must be 64 characters or fewer."}, nil
+	}
+	cfg := h.session.Config
+	if cfg == nil {
+		return Result{}, errors.New("configuration not loaded")
+	}
+	if cfg.Username == name {
+		return Result{Output: fmt.Sprintf("Username already set to %s", name)}, nil
+	}
+	old := cfg.Username
+	cfg.Username = name
+	if err := cfg.Save(); err != nil {
+		cfg.Username = old
+		return Result{}, err
+	}
+	if h.session.Transfer != nil {
+		h.session.Transfer.UpdateLocalUser(name)
+	}
+	if h.session.Discovery != nil {
+		h.session.Discovery.UpdateLocalUser(name)
+		h.session.Discovery.ForceAnnounce()
+	}
+	return Result{Output: fmt.Sprintf("Username updated to %s", name)}, nil
+}
+
 func (h *Handler) cmdStatus() (Result, error) {
 	cfg := h.session.Config
 	peers := h.session.Discovery.ListPeers()
@@ -439,6 +475,8 @@ func helpText() string {
 	b.WriteString("    List online peers with last-seen timestamps." + "\n")
 	b.WriteString("  " + accent + "@whoami" + reset + "\n")
 	b.WriteString("    Show your username, LAN IP, and listening port." + "\n")
+	b.WriteString("  " + accent + "@setname <username>" + reset + "\n")
+	b.WriteString("    Update the username you broadcast to the LAN." + "\n")
 	b.WriteString("  " + accent + "@status" + reset + "\n")
 	b.WriteString("    Summarize discovery health and receive directories." + "\n\n")
 

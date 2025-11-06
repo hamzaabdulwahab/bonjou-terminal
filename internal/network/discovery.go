@@ -34,6 +34,7 @@ type DiscoveryService struct {
 	logger    *logger.Logger
 	peers     map[string]*Peer
 	mu        sync.RWMutex
+	localMu   sync.RWMutex
 	stop      chan struct{}
 	stopOnce  sync.Once
 	wait      sync.WaitGroup
@@ -57,9 +58,11 @@ func (d *DiscoveryService) Start(username, ip string, port int) error {
 	if d.started {
 		return nil
 	}
+	d.localMu.Lock()
 	d.localUser = username
 	d.localIP = ip
 	d.localPort = port
+	d.localMu.Unlock()
 	d.wait.Add(2)
 	go d.listenLoop()
 	go d.announceLoop()
@@ -75,6 +78,36 @@ func (d *DiscoveryService) Stop() {
 	d.stopOnce.Do(func() { close(d.stop) })
 	d.wait.Wait()
 	d.started = false
+}
+
+// UpdateLocalUser switches the announcer to a new username.
+func (d *DiscoveryService) UpdateLocalUser(username string) {
+	d.localMu.Lock()
+	d.localUser = username
+	d.localMu.Unlock()
+}
+
+// ForceAnnounce immediately broadcasts the latest local identity.
+func (d *DiscoveryService) ForceAnnounce() {
+	if !d.started {
+		return
+	}
+	d.localMu.RLock()
+	ann := announcement{Username: d.localUser, IP: d.localIP, Port: d.localPort, Timestamp: time.Now().Unix(), Secret: d.cfg.Secret}
+	d.localMu.RUnlock()
+	if ann.IP == "" || ann.Port == 0 {
+		return
+	}
+	conn, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4bcast, Port: d.cfg.DiscoveryPort})
+	if err != nil {
+		d.logger.Error("force announce dial: %v", err)
+		return
+	}
+	defer conn.Close()
+	data, _ := json.Marshal(ann)
+	if _, err := conn.Write(data); err != nil {
+		d.logger.Error("force announce write: %v", err)
+	}
 }
 
 // ListPeers returns peers observed within the freshness window.
@@ -164,7 +197,11 @@ func (d *DiscoveryService) listenLoop() {
 			d.logger.Error("invalid announcement from %s: %v", remote.IP.String(), err)
 			continue
 		}
-		if ann.IP == d.localIP && ann.Port == d.localPort {
+		d.localMu.RLock()
+		localIP := d.localIP
+		localPort := d.localPort
+		d.localMu.RUnlock()
+		if ann.IP == localIP && ann.Port == localPort {
 			continue
 		}
 		peer := &Peer{Username: ann.Username, IP: ann.IP, Port: ann.Port, LastSeen: time.Now(), Secret: ann.Secret}
@@ -180,7 +217,9 @@ func (d *DiscoveryService) announceLoop() {
 	defer ticker.Stop()
 	broadcastAddr := &net.UDPAddr{IP: net.IPv4bcast, Port: d.cfg.DiscoveryPort}
 	payload := func() []byte {
+		d.localMu.RLock()
 		ann := announcement{Username: d.localUser, IP: d.localIP, Port: d.localPort, Timestamp: time.Now().Unix(), Secret: d.cfg.Secret}
+		d.localMu.RUnlock()
 		data, _ := json.Marshal(ann)
 		return data
 	}
