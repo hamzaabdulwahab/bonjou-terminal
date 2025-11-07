@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/chzyer/readline"
+	"golang.org/x/term"
 
 	"github.com/hamzawahab/bonjou-terminal/internal/commands"
 	"github.com/hamzawahab/bonjou-terminal/internal/events"
@@ -50,6 +51,7 @@ type UI struct {
 }
 
 func New(session *session.Session, handler *commands.Handler) (*UI, error) {
+	interactive := term.IsTerminal(int(os.Stdin.Fd()))
 	cfg := &readline.Config{
 		Prompt:                 colorMuted + "> " + colorReset,
 		InterruptPrompt:        colorMuted + "^C" + colorReset + "\n",
@@ -60,9 +62,14 @@ func New(session *session.Session, handler *commands.Handler) (*UI, error) {
 		Stdout:                 os.Stdout,
 		Stderr:                 os.Stderr,
 	}
+	configureReadline(cfg)
+	enableANSI()
 	rl, err := readline.NewEx(cfg)
 	if err != nil {
 		return nil, err
+	}
+	if !interactive {
+		fmt.Fprintln(os.Stderr, colorMuted+"(Limited terminal detected; line editing shortcuts may be unavailable.)"+colorReset)
 	}
 	home, _ := os.UserHomeDir()
 	return &UI{
@@ -72,6 +79,20 @@ func New(session *session.Session, handler *commands.Handler) (*UI, error) {
 		done:    make(chan struct{}),
 		homeDir: home,
 	}, nil
+}
+
+func configureReadline(cfg *readline.Config) {
+	cfg.HistoryLimit = 1024
+	cfg.FuncIsTerminal = func() bool {
+		return term.IsTerminal(int(os.Stdin.Fd()))
+	}
+	cfg.FuncGetWidth = func() int {
+		width, _, err := term.GetSize(int(os.Stdout.Fd()))
+		if err != nil || width <= 0 {
+			return bannerWidth
+		}
+		return width
+	}
 }
 
 // Run starts the interactive Bonjou session.

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"syscall"
 
 	"github.com/hamzawahab/bonjou-terminal/internal/commands"
@@ -22,6 +24,10 @@ func main() {
 	if isVersionQuery(args) {
 		fmt.Println(version.Version)
 		return
+	}
+	if !invocationIsCanonical() {
+		fmt.Fprintln(os.Stderr, "Launch Bonjou using the lowercase `bonjou` command.")
+		os.Exit(1)
 	}
 	if len(args) > 0 {
 		fmt.Fprintln(os.Stderr, "bonjou does not accept arguments. Run `bonjou --version` to check the version.")
@@ -83,6 +89,16 @@ func main() {
 
 	console.Run()
 	sess.Close()
+}
+
+func invocationIsCanonical() bool {
+	base := filepath.Base(os.Args[0])
+	switch runtime.GOOS {
+	case "windows":
+		return base == "bonjou.exe"
+	default:
+		return base == "bonjou"
+	}
 }
 
 func isVersionQuery(args []string) bool {

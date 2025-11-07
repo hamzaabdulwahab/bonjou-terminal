@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/hamzawahab/bonjou-terminal/internal/network"
 	"github.com/hamzawahab/bonjou-terminal/internal/session"
@@ -173,13 +174,9 @@ func (h *Handler) cmdFolder(parts []string, args string) (Result, error) {
 }
 
 func (h *Handler) cmdMulti(parts []string, args string) (Result, error) {
-	if len(parts) < 3 {
+	targetsPart, payload, ok := splitMultiArgs(args)
+	if !ok {
 		return Result{Output: "Usage: @multi <u1,u2,...> <message|file>"}, nil
-	}
-	targetsPart := parts[1]
-	payload := strings.TrimSpace(strings.TrimPrefix(args, targetsPart))
-	if payload == "" {
-		return Result{Output: "Message or file path required."}, nil
 	}
 	payloadPath := ""
 	payloadIsDir := false
@@ -289,30 +286,38 @@ func (h *Handler) cmdSetName(arg string) (Result, error) {
 	if strings.ContainsAny(name, "\n\r") {
 		return Result{Output: "Username cannot contain newlines."}, nil
 	}
-	if len(name) > 64 {
+	sanitised, changed := sanitiseUsername(name)
+	if sanitised == "" {
+		return Result{Output: "Username cannot be blank."}, nil
+	}
+	if len(sanitised) > 64 {
 		return Result{Output: "Username must be 64 characters or fewer."}, nil
 	}
 	cfg := h.session.Config
 	if cfg == nil {
 		return Result{}, errors.New("configuration not loaded")
 	}
-	if cfg.Username == name {
-		return Result{Output: fmt.Sprintf("Username already set to %s", name)}, nil
+	if cfg.Username == sanitised {
+		return Result{Output: fmt.Sprintf("Username already set to %s", sanitised)}, nil
 	}
 	old := cfg.Username
-	cfg.Username = name
+	cfg.Username = sanitised
 	if err := cfg.Save(); err != nil {
 		cfg.Username = old
 		return Result{}, err
 	}
 	if h.session.Transfer != nil {
-		h.session.Transfer.UpdateLocalUser(name)
+		h.session.Transfer.UpdateLocalUser(sanitised)
 	}
 	if h.session.Discovery != nil {
-		h.session.Discovery.UpdateLocalUser(name)
+		h.session.Discovery.UpdateLocalUser(sanitised)
 		h.session.Discovery.ForceAnnounce()
 	}
-	return Result{Output: fmt.Sprintf("Username updated to %s", name)}, nil
+	msg := fmt.Sprintf("Username updated to %s", sanitised)
+	if changed {
+		msg += " (spaces converted to '-')"
+	}
+	return Result{Output: msg}, nil
 }
 
 func (h *Handler) cmdStatus() (Result, error) {
@@ -402,6 +407,42 @@ func runUpdateCandidate(path string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func splitMultiArgs(input string) (string, string, bool) {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return "", "", false
+	}
+	lastNonSpace := rune(0)
+	for idx, r := range trimmed {
+		if unicode.IsSpace(r) {
+			if lastNonSpace != ',' {
+				targets := strings.TrimSpace(trimmed[:idx])
+				payload := strings.TrimSpace(trimmed[idx:])
+				if targets == "" || payload == "" {
+					return "", "", false
+				}
+				return targets, payload, true
+			}
+			continue
+		}
+		lastNonSpace = r
+	}
+	return "", "", false
+}
+
+func sanitiseUsername(input string) (string, bool) {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return "", false
+	}
+	parts := strings.Fields(trimmed)
+	if len(parts) == 0 {
+		return "", false
+	}
+	joined := strings.Join(parts, "-")
+	return joined, joined != trimmed
 }
 
 func normalizePathArg(input string) (string, error) {

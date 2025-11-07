@@ -92,22 +92,20 @@ func (d *DiscoveryService) ForceAnnounce() {
 	if !d.started {
 		return
 	}
-	d.localMu.RLock()
-	ann := announcement{Username: d.localUser, IP: d.localIP, Port: d.localPort, Timestamp: time.Now().Unix(), Secret: d.cfg.Secret}
-	d.localMu.RUnlock()
-	if ann.IP == "" || ann.Port == 0 {
+	payload, ok := d.prepareAnnouncement()
+	if !ok {
 		return
 	}
-	conn, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4bcast, Port: d.cfg.DiscoveryPort})
+	conn, err := net.ListenUDP("udp4", nil)
 	if err != nil {
-		d.logger.Error("force announce dial: %v", err)
+		d.logger.Error("force announce socket: %v", err)
 		return
 	}
 	defer conn.Close()
-	data, _ := json.Marshal(ann)
-	if _, err := conn.Write(data); err != nil {
-		d.logger.Error("force announce write: %v", err)
-	}
+	enableBroadcast(conn)
+	_ = conn.SetWriteBuffer(1024)
+	addrs := d.broadcastAddrs()
+	d.writeAnnouncement(conn, payload, addrs)
 }
 
 // ListPeers returns peers observed within the freshness window.
@@ -215,31 +213,123 @@ func (d *DiscoveryService) announceLoop() {
 	defer d.wait.Done()
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
-	broadcastAddr := &net.UDPAddr{IP: net.IPv4bcast, Port: d.cfg.DiscoveryPort}
-	payload := func() []byte {
-		d.localMu.RLock()
-		ann := announcement{Username: d.localUser, IP: d.localIP, Port: d.localPort, Timestamp: time.Now().Unix(), Secret: d.cfg.Secret}
-		d.localMu.RUnlock()
-		data, _ := json.Marshal(ann)
-		return data
-	}
-	conn, err := net.DialUDP("udp4", nil, broadcastAddr)
+	conn, err := net.ListenUDP("udp4", nil)
 	if err != nil {
 		d.logger.Error("discovery announcer failed: %v", err)
 		return
 	}
 	defer conn.Close()
+	enableBroadcast(conn)
 	if err := conn.SetWriteBuffer(1024); err != nil {
 		d.logger.Error("discovery write buffer: %v", err)
 	}
+	d.sendCurrentAnnouncement(conn)
 	for {
-		if _, err := conn.Write(payload()); err != nil {
-			d.logger.Error("discovery announce error: %v", err)
-		}
 		select {
 		case <-ticker.C:
+			d.sendCurrentAnnouncement(conn)
 		case <-d.stop:
 			return
 		}
+	}
+}
+
+func (d *DiscoveryService) sendCurrentAnnouncement(conn *net.UDPConn) {
+	payload, ok := d.prepareAnnouncement()
+	if !ok {
+		return
+	}
+	addrs := d.broadcastAddrs()
+	d.writeAnnouncement(conn, payload, addrs)
+}
+
+func (d *DiscoveryService) prepareAnnouncement() ([]byte, bool) {
+	d.localMu.RLock()
+	ann := announcement{Username: d.localUser, IP: d.localIP, Port: d.localPort, Timestamp: time.Now().Unix(), Secret: d.cfg.Secret}
+	d.localMu.RUnlock()
+	if ann.IP == "" || ann.Port == 0 {
+		return nil, false
+	}
+	data, err := json.Marshal(ann)
+	if err != nil {
+		d.logger.Error("marshal announcement: %v", err)
+		return nil, false
+	}
+	return data, true
+}
+
+func (d *DiscoveryService) broadcastAddrs() []*net.UDPAddr {
+	seen := make(map[string]struct{})
+	var addrs []*net.UDPAddr
+	global := &net.UDPAddr{IP: net.IPv4bcast, Port: d.cfg.DiscoveryPort}
+	addrs = append(addrs, global)
+	seen[global.String()] = struct{}{}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		d.logger.Error("list interfaces: %v", err)
+		return addrs
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagBroadcast == 0 {
+			continue
+		}
+		if iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addresses, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addresses {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip := ipNet.IP.To4()
+			if ip == nil || ip.Equal(net.IPv4zero) {
+				continue
+			}
+			mask := ipNet.Mask
+			if len(mask) != net.IPv4len {
+				continue
+			}
+			broadcast := net.IPv4(ip[0]|^mask[0], ip[1]|^mask[1], ip[2]|^mask[2], ip[3]|^mask[3])
+			if broadcast.Equal(net.IPv4zero) {
+				continue
+			}
+			udpAddr := &net.UDPAddr{IP: broadcast, Port: d.cfg.DiscoveryPort}
+			key := udpAddr.String()
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			addrs = append(addrs, udpAddr)
+		}
+	}
+	return addrs
+}
+
+func (d *DiscoveryService) writeAnnouncement(conn *net.UDPConn, payload []byte, addrs []*net.UDPAddr) {
+	if len(addrs) == 0 {
+		addrs = []*net.UDPAddr{{IP: net.IPv4bcast, Port: d.cfg.DiscoveryPort}}
+	}
+	for _, addr := range addrs {
+		if addr == nil {
+			continue
+		}
+		if _, err := conn.WriteToUDP(payload, addr); err != nil {
+			d.logger.Error("discovery announce to %s: %v", addr, err)
+		}
+	}
+}
+
+func enableBroadcast(conn *net.UDPConn) {
+	if conn == nil {
+		return
+	}
+	if raw, err := conn.SyscallConn(); err == nil {
+		_ = raw.Control(func(fd uintptr) {
+			setBroadcastOption(fd)
+		})
 	}
 }

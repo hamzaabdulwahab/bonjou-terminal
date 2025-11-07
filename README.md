@@ -6,11 +6,12 @@ Bonjou is a cross-platform, terminal-based LAN chat and transfer application wri
 
 - 🔌 Works entirely on LAN – no central server required.
 - 💬 Low-friction terminal UI with command-driven interactions.
-- ⌨️ Rich line editing with history, arrow keys, and familiar shortcuts (Ctrl+A/E/U, Home/End, etc.).
+- ⌨️ Rich line editing with history, arrow keys, and OS-specific shortcuts (Alt/Option word hops, Ctrl+U/K deletes, etc.).
 - 📁 Fast file and folder transfer with automatic compression, checksums, and progress updates.
-- 📡 Peer discovery over UDP broadcasts; encrypted integrity checks over TCP for data transport.
+- 📡 Peer discovery over UDP broadcasts across every active NIC; encrypted integrity checks over TCP for data transport.
 - 🗃️ Persistent logs and received files stored under `~/.bonjou/`.
 - 📦 Cross-compiled binaries for Linux, macOS, and Windows with packaging artefacts for APT, Homebrew, and Scoop.
+- 🪪 Username safety: spaces are normalised to `-` automatically when you run `@setname`.
 
 ## Getting Started
 
@@ -26,8 +27,13 @@ cd bonjou-terminal
 ./scripts/build.sh
 ```
 
-The script cross-compiles Bonjou for Linux, macOS, and Windows. You can also
-directly compile individual targets into `bin/` with:
+The script cross-compiles Bonjou for Linux, macOS, and Windows. To trial changes rapidly you can run Bonjou directly from source:
+
+```bash
+go run ./cmd/bonjou
+```
+
+Or build a single platform binary for ad-hoc testing:
 
 ```bash
 GOOS=linux   GOARCH=amd64 go build -o bin/bonjou-linux ./cmd/bonjou
@@ -52,7 +58,7 @@ zip bonjou-windows.zip bonjou.exe
 
 Outputs:
 
-- Debian package: `dist/deb/bonjou_1.0.6_amd64.deb`
+- Debian package: `dist/deb/bonjou_1.0.7_amd64.deb`
 - Homebrew formula: `dist/homebrew/bonjou.rb`
 - Scoop manifest: `dist/scoop/bonjou.json`
 
@@ -66,8 +72,8 @@ Pre-built packages are published on the
 #### Linux (.deb)
 
 ```bash
-wget https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.6/bonjou_1.0.6_amd64.deb
-sudo dpkg -i bonjou_1.0.6_amd64.deb
+wget https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.7/bonjou_1.0.7_amd64.deb
+sudo dpkg -i bonjou_1.0.7_amd64.deb
 ```
 
 If dependency errors occur, run `sudo apt -f install` and re-run the `dpkg -i`
@@ -109,6 +115,9 @@ Upgrade with the latest manifest by running:
 ```powershell
 scoop update
 scoop update bonjou
+# If a download is interrupted, clear the partial cache before retrying
+scoop cache rm bonjou
+scoop install bonjou
 ```
 
 ### Offline / LAN Distribution
@@ -133,7 +142,7 @@ bonjou --version
 Opening banner:
 
 ```
-🌐 Welcome to Bonjou v1.0.6
+🌐 Welcome to Bonjou v1.0.7
 👤 User: <username> | IP: <ip>
 📡 LAN: Connected
 Type @help for commands.
@@ -162,10 +171,22 @@ Received files arrive under:
 
 Logs live in `~/.bonjou/logs`. Use `@setpath <dir>` to move incoming storage elsewhere.
 
+### Keyboard Shortcuts
+
+| Platform | Line Start/End | Word Navigation | History/Search | Screen & Editing |
+| --- | --- | --- | --- | --- |
+| Windows | `Ctrl+A` / `Ctrl+E` | `Alt+B` / `Alt+F` | `↑` / `↓`, `Ctrl+R` | `Ctrl+U` (cut left), `Ctrl+K` (cut right), `Ctrl+L` (clear) |
+| macOS | `Ctrl+A` / `Ctrl+E` (or `⌘+←/→`) | `Option+B` / `Option+F` *(enable “Use Option as Meta”)* | `↑` / `↓`, `Ctrl+R` | `Ctrl+U`, `Ctrl+K`, `Ctrl+L` |
+| Linux | `Ctrl+A` / `Ctrl+E` | `Alt+B` / `Alt+F` | `↑` / `↓`, `Ctrl+R` | `Ctrl+U`, `Ctrl+K`, `Ctrl+L`, `Alt+D` (delete next word) |
+
+The prompt now blocks uppercase aliases, so launch Bonjou with the lowercase `bonjou` command (or `bonjou.exe` on Windows).
+
 ### Troubleshooting
 
-- If you see `Rejected incoming payload` errors, the receiving side has not discovered you yet or is running an older Bonjou build. Wait for the peer to appear in `@users` and ensure both machines are using v1.0.6 or newer.
+- If you see `Rejected incoming payload` errors, the receiving side has not discovered you yet or is running an older Bonjou build. Wait for the peer to appear in `@users` and ensure both machines are using v1.0.7 or newer.
 - `write: broken pipe` typically indicates the connection dropped mid-transfer; double-check both hosts are still connected to the LAN and re-send once discovery refreshes (announcements repeat every 5 seconds).
+- If Scoop reports a cached download error, run `scoop cache rm bonjou` before repeating `scoop install bonjou`.
+- `@multi` accepts comma-separated peers with or without spaces (e.g. `@multi alice, bob`). Each file/folder is streamed sequentially, so large fan-outs take longer than a single transfer.
 
 ## Architecture Overview
 
