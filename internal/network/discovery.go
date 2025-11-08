@@ -87,6 +87,27 @@ func (d *DiscoveryService) UpdateLocalUser(username string) {
 	d.localMu.Unlock()
 }
 
+// UpdateLocalEndpoint refreshes the local IP/port and resets peer cache for new networks.
+func (d *DiscoveryService) UpdateLocalEndpoint(ip string, port int) {
+	if ip == "" && port <= 0 {
+		return
+	}
+	d.localMu.Lock()
+	if ip != "" {
+		d.localIP = ip
+	}
+	if port > 0 {
+		d.localPort = port
+	}
+	d.localMu.Unlock()
+
+	d.mu.Lock()
+	d.peers = make(map[string]*Peer)
+	d.mu.Unlock()
+
+	go d.ForceAnnounce()
+}
+
 // ForceAnnounce immediately broadcasts the latest local identity.
 func (d *DiscoveryService) ForceAnnounce() {
 	if !d.started {

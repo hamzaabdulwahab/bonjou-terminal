@@ -58,7 +58,7 @@ zip bonjou-windows.zip bonjou.exe
 
 Outputs:
 
-- Debian package: `dist/deb/bonjou_1.0.7_amd64.deb`
+- Debian package: `dist/deb/bonjou_1.0.8_amd64.deb`
 - Homebrew formula: `dist/homebrew/bonjou.rb`
 - Scoop manifest: `dist/scoop/bonjou.json`
 
@@ -72,8 +72,8 @@ Pre-built packages are published on the
 #### Linux (.deb)
 
 ```bash
-wget https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.7/bonjou_1.0.7_amd64.deb
-sudo dpkg -i bonjou_1.0.7_amd64.deb
+wget https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.8/bonjou_1.0.8_amd64.deb
+sudo dpkg -i bonjou_1.0.8_amd64.deb
 ```
 
 If dependency errors occur, run `sudo apt -f install` and re-run the `dpkg -i`
@@ -142,7 +142,7 @@ bonjou --version
 Opening banner:
 
 ```
-🌐 Welcome to Bonjou v1.0.7
+🌐 Welcome to Bonjou v1.0.8
 👤 User: <username> | IP: <ip>
 📡 LAN: Connected
 Type @help for commands.
@@ -183,7 +183,7 @@ The prompt now blocks uppercase aliases, so launch Bonjou with the lowercase `bo
 
 ### Troubleshooting
 
-- If you see `Rejected incoming payload` errors, the receiving side has not discovered you yet or is running an older Bonjou build. Wait for the peer to appear in `@users` and ensure both machines are using v1.0.7 or newer.
+- If you see `Rejected incoming payload` errors, the receiving side has not discovered you yet or is running an older Bonjou build. Wait for the peer to appear in `@users` and ensure both machines are using v1.0.8 or newer.
 - `write: broken pipe` typically indicates the connection dropped mid-transfer; double-check both hosts are still connected to the LAN and re-send once discovery refreshes (announcements repeat every 5 seconds).
 - If Scoop reports a cached download error, run `scoop cache rm bonjou` before repeating `scoop install bonjou`.
 - `@multi` accepts comma-separated peers with or without spaces (e.g. `@multi alice, bob`). Each file/folder is streamed sequentially, so large fan-outs take longer than a single transfer.

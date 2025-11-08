@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net"
@@ -8,9 +9,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"text/tabwriter"
 	"time"
 	"unicode"
 
+	"github.com/hamzawahab/bonjou-terminal/internal/history"
 	"github.com/hamzawahab/bonjou-terminal/internal/network"
 	"github.com/hamzawahab/bonjou-terminal/internal/session"
 )
@@ -83,12 +86,15 @@ func (h *Handler) Handle(input string) (Result, error) {
 
 func (h *Handler) cmdWhoAmI() (Result, error) {
 	cfg := h.session.Config
-	msg := fmt.Sprintf("Username: %s\nIP: %s\nListen port: %d", cfg.Username, h.session.LocalIP, cfg.ListenPort)
+	msg := fmt.Sprintf("Username: %s\nIP: %s\nListen port: %d", cfg.Username, h.session.LocalIP(), cfg.ListenPort)
 	return Result{Output: msg}, nil
 }
 
 func (h *Handler) cmdUsers() (Result, error) {
 	peers := h.session.Discovery.ListPeers()
+	if h.session.Discovery != nil {
+		go h.session.Discovery.ForceAnnounce()
+	}
 	if len(peers) == 0 {
 		return Result{Output: "No active users discovered."}, nil
 	}
@@ -216,6 +222,7 @@ func (h *Handler) cmdMulti(parts []string, args string) (Result, error) {
 	if len(errs) > 0 {
 		return Result{Output: fmt.Sprintf("Completed %d transfers, %d errors:\n%s", success, len(errs), strings.Join(errs, "\n"))}, nil
 	}
+
 	return Result{Output: fmt.Sprintf("Completed %d transfers", success)}, nil
 }
 
@@ -246,14 +253,15 @@ func (h *Handler) cmdBroadcast(message string) (Result, error) {
 }
 
 func (h *Handler) cmdHistory() (Result, error) {
-	lines, err := h.session.History.ReadAll()
+	entries, err := h.session.History.ReadAll()
 	if err != nil {
 		return Result{}, err
 	}
-	if len(lines) == 0 {
+	if len(entries) == 0 {
 		return Result{Output: "History is empty."}, nil
 	}
-	return Result{Output: strings.Join(lines, "\n")}, nil
+	render := formatHistoryTable(entries, h.session.Config.Username)
+	return Result{Output: render}, nil
 }
 
 func (h *Handler) cmdSetPath(arg string) (Result, error) {
@@ -325,7 +333,7 @@ func (h *Handler) cmdStatus() (Result, error) {
 	peers := h.session.Discovery.ListPeers()
 	lines := []string{
 		fmt.Sprintf("Username: %s", cfg.Username),
-		fmt.Sprintf("Local IP: %s", h.session.LocalIP),
+		fmt.Sprintf("Local IP: %s", h.session.LocalIP()),
 		fmt.Sprintf("Listen port: %d", cfg.ListenPort),
 		fmt.Sprintf("Discovery port: %d", cfg.DiscoveryPort),
 		fmt.Sprintf("Discovered peers: %d", len(peers)),
@@ -396,10 +404,11 @@ func peerLabel(peer *network.Peer) string {
 }
 
 func safePeerLabel(name string) string {
-	if name == "" {
-		return "unknown"
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return "(unknown)"
 	}
-	return name
+	return trimmed
 }
 
 func runUpdateCandidate(path string) error {
@@ -534,4 +543,147 @@ func helpText() string {
 	b.WriteString("    Quit Bonjou." + "\n")
 
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func formatHistoryTable(entries []history.Entry, localUser string) string {
+	var buf bytes.Buffer
+	w := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "Time\tType\tPeer\tDirection\tDetails\tSize")
+	for _, entry := range entries {
+		peer, direction := describeHistoryDirection(entry, localUser)
+		details := describeHistoryDetails(entry)
+		size := describeHistorySize(entry)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			entry.Timestamp.Format("2006-01-02 15:04:05"),
+			describeHistoryType(entry),
+			peer,
+			direction,
+			details,
+			size,
+		)
+	}
+	_ = w.Flush()
+	return buf.String()
+}
+
+func describeHistoryType(entry history.Entry) string {
+	switch strings.ToLower(entry.Category) {
+	case "chat":
+		return "Message"
+	case "transfer":
+		switch strings.ToLower(entry.Kind) {
+		case "folder":
+			return "Folder"
+		case "file":
+			return "File"
+		default:
+			return "Transfer"
+		}
+	default:
+		return titleCaseWord(entry.Category)
+	}
+}
+
+func describeHistoryDirection(entry history.Entry, localUser string) (string, string) {
+	from := strings.TrimSpace(entry.From)
+	to := strings.TrimSpace(entry.To)
+	local := strings.TrimSpace(localUser)
+	switch {
+	case local != "" && strings.EqualFold(from, local):
+		peer := safePeerLabel(to)
+		return peer, "Sent"
+	case local != "" && strings.EqualFold(to, local):
+		peer := safePeerLabel(from)
+		return peer, "Received"
+	default:
+		peer := safePeerLabel(from)
+		if peer == "(unknown)" {
+			peer = safePeerLabel(to)
+		}
+		direction := strings.TrimSpace(from + " → " + to)
+		if direction == "→" || direction == "" {
+			direction = "-"
+		}
+		return peer, direction
+	}
+}
+
+func describeHistoryDetails(entry history.Entry) string {
+	switch strings.ToLower(entry.Category) {
+	case "chat":
+		message := strings.TrimSpace(entry.Message)
+		if message == "" {
+			message = "(empty message)"
+		}
+		return fmt.Sprintf("Message %q", truncateMiddle(message, 64))
+	case "transfer":
+		label := strings.TrimSpace(entry.Path)
+		if label == "" {
+			label = "(unknown path)"
+		}
+		base := filepath.Base(label)
+		if base == "." || base == string(os.PathSeparator) {
+			base = label
+		}
+		prefix := "Transfer"
+		switch strings.ToLower(entry.Kind) {
+		case "file":
+			prefix = "File"
+		case "folder":
+			prefix = "Folder"
+		}
+		return fmt.Sprintf("%s %s", prefix, base)
+	default:
+		return strings.TrimSpace(entry.Message)
+	}
+}
+
+func describeHistorySize(entry history.Entry) string {
+	if strings.ToLower(entry.Category) != "transfer" {
+		return "-"
+	}
+	if entry.Size <= 0 {
+		return "-"
+	}
+	return humanBytes(entry.Size)
+}
+
+func truncateMiddle(s string, limit int) string {
+	runes := []rune(s)
+	if limit <= 0 || len(runes) <= limit {
+		return s
+	}
+	head := limit / 2
+	tail := limit - head - 1
+	if tail < 0 {
+		tail = 0
+	}
+	return string(runes[:head]) + "…" + string(runes[len(runes)-tail:])
+}
+
+func humanBytes(n int64) string {
+	if n <= 0 {
+		return "0 B"
+	}
+	units := []string{"B", "KB", "MB", "GB", "TB", "PB"}
+	value := float64(n)
+	idx := 0
+	for value >= 1024 && idx < len(units)-1 {
+		value /= 1024
+		idx++
+	}
+	if value >= 10 || idx == 0 {
+		return fmt.Sprintf("%.0f %s", value, units[idx])
+	}
+	return fmt.Sprintf("%.1f %s", value, units[idx])
+}
+
+func titleCaseWord(input string) string {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return "-"
+	}
+	runes := []rune(strings.ToLower(trimmed))
+	runes[0] = unicode.ToUpper(runes[0])
+	return string(runes)
 }

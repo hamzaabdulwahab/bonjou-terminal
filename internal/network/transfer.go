@@ -565,6 +565,18 @@ func (t *TransferService) UpdateLocalUser(username string) {
 	t.localMu.Unlock()
 }
 
+// UpdateLocalEndpoint updates cached identity fields following network changes.
+func (t *TransferService) UpdateLocalEndpoint(username, ip string) {
+	t.localMu.Lock()
+	if username != "" {
+		t.localUser = username
+	}
+	if ip != "" {
+		t.localIP = ip
+	}
+	t.localMu.Unlock()
+}
+
 func (t *TransferService) sharedKey(peerSecret string) []byte {
 	parts := []string{t.cfg.Secret, peerSecret}
 	sort.Strings(parts)

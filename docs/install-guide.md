@@ -1,6 +1,6 @@
 # Bonjou Installation Guide
 
-This document walks through every supported way to install Bonjou v1.0.7 on macOS, Linux, and Windows. Pick the option that best matches your environment. Each path ends with Bonjou available on your `PATH` so you can launch it with a simple `bonjou` command.
+This document walks through every supported way to install Bonjou v1.0.8 on macOS, Linux, and Windows. Pick the option that best matches your environment. Each path ends with Bonjou available on your `PATH` so you can launch it with a simple `bonjou` command.
 
 > **Tip:** If you are transferring the app to offline hosts, jump to [Offline Distribution](#offline-distribution) for AirDrop/USB steps.
 
@@ -32,7 +32,7 @@ This document walks through every supported way to install Bonjou v1.0.7 on macO
 1. Fetch the tarball from the latest release:
    ```bash
       curl -L -o bonjou-macos.tar.gz \
-         https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.7/bonjou-macos.tar.gz
+         https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.8/bonjou-macos.tar.gz
    ```
 2. Verify checksum (optional, recommended):
    ```bash
@@ -72,15 +72,15 @@ This document walks through every supported way to install Bonjou v1.0.7 on macO
 
 1. Download the package:
    ```bash
-         wget https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.7/bonjou_1.0.7_amd64.deb
+         wget https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.8/bonjou_1.0.8_amd64.deb
    ```
 2. Verify checksum:
    ```bash
-   echo "2bd3678aeb4d073ae8d1aef020ae7e6443759aa4a2e6e209f6a2222001812a8d  bonjou_1.0.7_amd64.deb" | sha256sum --check
+   echo "3bb1b4a4dc9c4a5e46e581deb4138c8e265ef37a2e3e7c0b1a405f5ea4270710  bonjou_1.0.8_amd64.deb" | sha256sum --check
    ```
 3. Install:
    ```bash
-   sudo dpkg -i bonjou_1.0.7_amd64.deb
+   sudo dpkg -i bonjou_1.0.8_amd64.deb
    ```
 4. Resolve dependencies if prompted:
    ```bash
@@ -93,11 +93,11 @@ This document walks through every supported way to install Bonjou v1.0.7 on macO
 1. Fetch the Linux tarball:
    ```bash
    curl -L -o bonjou-linux.tar.gz \
-   https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.7/bonjou-linux.tar.gz
+   https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.8/bonjou-linux.tar.gz
    ```
 2. Check the SHA256:
    ```bash
-   echo "387a7aa4a5f78db95c28d9d252db14144734a0f39bcc75280edb039f150284fd  bonjou-linux.tar.gz" | sha256sum --check
+   echo "a72d80cc66271ef1caf06150ac8d9174509251ac66cce40a1c75ecd9c9a0e6cc  bonjou-linux.tar.gz" | sha256sum --check
    ```
 3. Extract and install:
    ```bash
@@ -155,7 +155,7 @@ This document walks through every supported way to install Bonjou v1.0.7 on macO
 
 1. Download the Windows zip:
    ```powershell
-   Invoke-WebRequest -Uri https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.7/bonjou-windows.zip -OutFile bonjou-windows.zip
+   Invoke-WebRequest -Uri https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.8/bonjou-windows.zip -OutFile bonjou-windows.zip
    ```
 2. Verify checksum (PowerShell):
    ```powershell
@@ -202,7 +202,7 @@ When installing on machines without internet access, carry the release artifacts
    - `bonjou-linux.tar.gz`
    - `bonjou-macos.tar.gz`
    - `bonjou-windows.zip`
-   - `bonjou_1.0.7_amd64.deb`
+   - `bonjou_1.0.8_amd64.deb`
    - `checksums.txt`
 2. Copy them to a USB drive or network share.
 
@@ -236,7 +236,7 @@ After any install method, verify the version:
 ```bash
 bonjou --version
 ```
-Expect `Bonjou v1.0.7`. Launch `bonjou` to enter the full-screen UI. If the command is not found, re-check that the binary is located in a directory included in your shell's `PATH`.
+Expect `Bonjou v1.0.8`. Launch `bonjou` to enter the full-screen UI. If the command is not found, re-check that the binary is located in a directory included in your shell's `PATH`.
 
 ## Running Directly From Source
 

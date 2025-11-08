@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"syscall"
+	"time"
 
 	"github.com/hamzawahab/bonjou-terminal/internal/commands"
 	"github.com/hamzawahab/bonjou-terminal/internal/config"
@@ -70,6 +71,7 @@ func main() {
 	}
 
 	sess := session.New(cfg, log, hist, discovery, transfer, eventStream, ip)
+	stopWatcher := sess.StartNetworkWatcher(5 * time.Second)
 	handler := commands.New(sess)
 	console, err := ui.New(sess, handler)
 	if err != nil {
@@ -83,11 +85,13 @@ func main() {
 	go func() {
 		<-sigs
 		fmt.Println("\nSignal received, shutting down...")
+		stopWatcher()
 		sess.Close()
 		os.Exit(0)
 	}()
 
 	console.Run()
+	stopWatcher()
 	sess.Close()
 }
 
