@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"net"
@@ -9,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"text/tabwriter"
 	"time"
 	"unicode"
 
@@ -100,8 +98,8 @@ func (h *Handler) cmdUsers() (Result, error) {
 	}
 	var lines []string
 	for _, peer := range peers {
-		ago := time.Since(peer.LastSeen).Round(time.Second)
-		lines = append(lines, fmt.Sprintf("%s (%s:%d) • seen %s ago", safePeerLabel(peer.Username), peer.IP, peer.Port, ago))
+		seen := seenLabel(peer.LastSeen)
+		lines = append(lines, fmt.Sprintf("%s (%s) • %s", safePeerLabel(peer.Username), peer.IP, seen))
 	}
 	return Result{Output: strings.Join(lines, "\n")}, nil
 }
@@ -403,6 +401,44 @@ func peerLabel(peer *network.Peer) string {
 	return fmt.Sprintf("%s:%d", peer.IP, peer.Port)
 }
 
+func seenLabel(lastSeen time.Time) string {
+	if lastSeen.IsZero() {
+		return "seen recently"
+	}
+	diff := time.Since(lastSeen)
+	if diff < 0 {
+		diff = 0
+	}
+	switch {
+	case diff < 1500*time.Millisecond:
+		return "seen just now"
+	case diff < time.Minute:
+		secs := int(diff.Round(time.Second) / time.Second)
+		if secs <= 1 {
+			return "seen 1s ago"
+		}
+		return fmt.Sprintf("seen %ds ago", secs)
+	case diff < time.Hour:
+		mins := int(diff.Round(time.Minute) / time.Minute)
+		if mins <= 1 {
+			return "seen 1m ago"
+		}
+		return fmt.Sprintf("seen %dm ago", mins)
+	case diff < 24*time.Hour:
+		hours := int(diff.Round(time.Hour) / time.Hour)
+		if hours <= 1 {
+			return "seen 1h ago"
+		}
+		return fmt.Sprintf("seen %dh ago", hours)
+	default:
+		days := int(diff.Round(24*time.Hour) / (24 * time.Hour))
+		if days <= 1 {
+			return "seen 1d ago"
+		}
+		return fmt.Sprintf("seen %dd ago", days)
+	}
+}
+
 func safePeerLabel(name string) string {
 	trimmed := strings.TrimSpace(name)
 	if trimmed == "" {
@@ -546,24 +582,100 @@ func helpText() string {
 }
 
 func formatHistoryTable(entries []history.Entry, localUser string) string {
-	var buf bytes.Buffer
-	w := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "Time\tType\tPeer\tDirection\tDetails\tSize")
+	const (
+		colTime      = 19
+		colType      = 8
+		colPeer      = 18
+		colDirection = 10
+		colDetails   = 40
+		colSize      = 10
+	)
+	widths := []int{colTime, colType, colPeer, colDirection, colDetails, colSize}
+	header := []string{"Time", "Type", "Peer", "Direction", "Details", "Size"}
+
+	var rows [][]string
 	for _, entry := range entries {
 		peer, direction := describeHistoryDirection(entry, localUser)
 		details := describeHistoryDetails(entry)
 		size := describeHistorySize(entry)
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+		rows = append(rows, []string{
 			entry.Timestamp.Format("2006-01-02 15:04:05"),
 			describeHistoryType(entry),
 			peer,
 			direction,
 			details,
 			size,
-		)
+		})
 	}
-	_ = w.Flush()
+
+	topDivider := drawHistoryDivider(widths, '-')
+	headerDivider := drawHistoryDivider(widths, '=')
+	var buf strings.Builder
+	buf.WriteString(topDivider)
+	buf.WriteString("\n")
+	buf.WriteString(drawHistoryRow(header, widths))
+	buf.WriteString("\n")
+	buf.WriteString(headerDivider)
+
+	if len(rows) == 0 {
+		empty := []string{"-", "-", "-", "-", "History is empty", "-"}
+		buf.WriteString("\n")
+		buf.WriteString(drawHistoryRow(empty, widths))
+		buf.WriteString("\n")
+		buf.WriteString(topDivider)
+		return buf.String()
+	}
+
+	for _, row := range rows {
+		buf.WriteString("\n")
+		buf.WriteString(drawHistoryRow(row, widths))
+		buf.WriteString("\n")
+		buf.WriteString(topDivider)
+	}
 	return buf.String()
+}
+
+func drawHistoryDivider(widths []int, fill rune) string {
+	var b strings.Builder
+	b.WriteString("+")
+	for _, width := range widths {
+		b.WriteString(strings.Repeat(string(fill), width+2))
+		b.WriteString("+")
+	}
+	return b.String()
+}
+
+func drawHistoryRow(cells []string, widths []int) string {
+	wrapped := make([][]string, len(cells))
+	maxLines := 0
+	for idx, cell := range cells {
+		width := widths[idx]
+		lines := wrapCell(cell, width)
+		wrapped[idx] = lines
+		if len(lines) > maxLines {
+			maxLines = len(lines)
+		}
+	}
+	if maxLines == 0 {
+		maxLines = 1
+	}
+	var b strings.Builder
+	for line := 0; line < maxLines; line++ {
+		if line > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString("|")
+		for idx, width := range widths {
+			text := ""
+			if line < len(wrapped[idx]) {
+				text = wrapped[idx][line]
+			}
+			b.WriteString(" ")
+			b.WriteString(padCell(text, width))
+			b.WriteString(" |")
+		}
+	}
+	return b.String()
 }
 
 func describeHistoryType(entry history.Entry) string {
@@ -615,7 +727,8 @@ func describeHistoryDetails(entry history.Entry) string {
 		if message == "" {
 			message = "(empty message)"
 		}
-		return fmt.Sprintf("Message %q", truncateMiddle(message, 64))
+		message = strings.ReplaceAll(message, "\n", " ")
+		return fmt.Sprintf("Message %q", message)
 	case "transfer":
 		label := strings.TrimSpace(entry.Path)
 		if label == "" {
@@ -648,17 +761,52 @@ func describeHistorySize(entry history.Entry) string {
 	return humanBytes(entry.Size)
 }
 
-func truncateMiddle(s string, limit int) string {
-	runes := []rune(s)
-	if limit <= 0 || len(runes) <= limit {
-		return s
+func padCell(value string, width int) string {
+	runes := []rune(value)
+	if len(runes) >= width {
+		return value
 	}
-	head := limit / 2
-	tail := limit - head - 1
-	if tail < 0 {
-		tail = 0
+	return value + strings.Repeat(" ", width-len(runes))
+}
+
+func wrapCell(value string, width int) []string {
+	if width <= 0 {
+		return []string{""}
 	}
-	return string(runes[:head]) + "…" + string(runes[len(runes)-tail:])
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return []string{""}
+	}
+	runes := []rune(trimmed)
+	var lines []string
+	for len(runes) > 0 {
+		if len(runes) <= width {
+			lines = append(lines, strings.TrimSpace(string(runes)))
+			break
+		}
+		split := width
+		for i := width; i > 0; i-- {
+			r := runes[i-1]
+			if unicode.IsSpace(r) {
+				split = i
+				break
+			}
+		}
+		lines = append(lines, strings.TrimSpace(string(runes[:split])))
+		runes = trimLeadingSpaces(runes[split:])
+	}
+	if len(lines) == 0 {
+		lines = append(lines, "")
+	}
+	return lines
+}
+
+func trimLeadingSpaces(runes []rune) []rune {
+	idx := 0
+	for idx < len(runes) && unicode.IsSpace(runes[idx]) {
+		idx++
+	}
+	return runes[idx:]
 }
 
 func humanBytes(n int64) string {

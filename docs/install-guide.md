@@ -1,6 +1,6 @@
 # Bonjou Installation Guide
 
-This document walks through every supported way to install Bonjou v1.0.8 on macOS, Linux, and Windows. Pick the option that best matches your environment. Each path ends with Bonjou available on your `PATH` so you can launch it with a simple `bonjou` command.
+This document walks through every supported way to install Bonjou v1.0.9 on macOS, Linux, and Windows. Pick the option that best matches your environment. Each path ends with Bonjou available on your `PATH` so you can launch it with a simple `bonjou` command.
 
 > **Tip:** If you are transferring the app to offline hosts, jump to [Offline Distribution](#offline-distribution) for AirDrop/USB steps.
 
@@ -31,12 +31,12 @@ This document walks through every supported way to install Bonjou v1.0.8 on macO
 
 1. Fetch the tarball from the latest release:
    ```bash
-      curl -L -o bonjou-macos.tar.gz \
-         https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.8/bonjou-macos.tar.gz
+       curl -L -o bonjou-macos.tar.gz \
+          https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.9/bonjou-macos.tar.gz
    ```
 2. Verify checksum (optional, recommended):
    ```bash
-   echo "961ef5593d7ac3328c0ad969164593d39ecff0893f8ac70e0e11555301e44bb5  bonjou-macos.tar.gz" | shasum -a 256 --check
+   echo "3a5df10f7a75e38ce64fe3d7f57c6b5ebaa6cc3542b30f3c5d5f868ece567bdf  bonjou-macos.tar.gz" | shasum -a 256 --check
    ```
 3. Extract and place on `PATH`:
    ```bash
@@ -72,15 +72,15 @@ This document walks through every supported way to install Bonjou v1.0.8 on macO
 
 1. Download the package:
    ```bash
-         wget https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.8/bonjou_1.0.8_amd64.deb
+         wget https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.9/bonjou_1.0.9_amd64.deb
    ```
 2. Verify checksum:
    ```bash
-   echo "3bb1b4a4dc9c4a5e46e581deb4138c8e265ef37a2e3e7c0b1a405f5ea4270710  bonjou_1.0.8_amd64.deb" | sha256sum --check
+   echo "7e436fcdcc26dcd97404f667b9c0c7d60a17678c4200c8f96291deea3039c3ac  bonjou_1.0.9_amd64.deb" | sha256sum --check
    ```
 3. Install:
    ```bash
-   sudo dpkg -i bonjou_1.0.8_amd64.deb
+   sudo dpkg -i bonjou_1.0.9_amd64.deb
    ```
 4. Resolve dependencies if prompted:
    ```bash
@@ -93,11 +93,11 @@ This document walks through every supported way to install Bonjou v1.0.8 on macO
 1. Fetch the Linux tarball:
    ```bash
    curl -L -o bonjou-linux.tar.gz \
-   https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.8/bonjou-linux.tar.gz
+   https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.9/bonjou-linux.tar.gz
    ```
 2. Check the SHA256:
    ```bash
-   echo "a72d80cc66271ef1caf06150ac8d9174509251ac66cce40a1c75ecd9c9a0e6cc  bonjou-linux.tar.gz" | sha256sum --check
+   echo "3f250ea9a23d4e31f743647c9655db3881a0008eea2c6357ff90c5693d18bfb0  bonjou-linux.tar.gz" | sha256sum --check
    ```
 3. Extract and install:
    ```bash
@@ -155,12 +155,12 @@ This document walks through every supported way to install Bonjou v1.0.8 on macO
 
 1. Download the Windows zip:
    ```powershell
-   Invoke-WebRequest -Uri https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.8/bonjou-windows.zip -OutFile bonjou-windows.zip
+   Invoke-WebRequest -Uri https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.9/bonjou-windows.zip -OutFile bonjou-windows.zip
    ```
 2. Verify checksum (PowerShell):
    ```powershell
    Get-FileHash .\bonjou-windows.zip -Algorithm SHA256 | Select-Object Hash
-      # Compare with: 7dd741bd600a69dd394a029c087653f9b2954d41e7e4fab2c8f91beeb830ffce
+   # Compare with: 1adb0e5df7b258b987d743f271647804fff9113bc2d6d0c030f987e445242df5
    ```
 3. Extract:
    ```powershell
@@ -202,7 +202,7 @@ When installing on machines without internet access, carry the release artifacts
    - `bonjou-linux.tar.gz`
    - `bonjou-macos.tar.gz`
    - `bonjou-windows.zip`
-   - `bonjou_1.0.8_amd64.deb`
+   - `bonjou_1.0.9_amd64.deb`
    - `checksums.txt`
 2. Copy them to a USB drive or network share.
 
@@ -236,7 +236,7 @@ After any install method, verify the version:
 ```bash
 bonjou --version
 ```
-Expect `Bonjou v1.0.8`. Launch `bonjou` to enter the full-screen UI. If the command is not found, re-check that the binary is located in a directory included in your shell's `PATH`.
+Expect `Bonjou v1.0.9`. Launch `bonjou` to enter the full-screen UI. If the command is not found, re-check that the binary is located in a directory included in your shell's `PATH`.
 
 ## Running Directly From Source
 

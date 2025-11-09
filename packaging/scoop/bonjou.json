@@ -1,12 +1,12 @@
 {
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Terminal-based LAN chat and transfer application",
   "homepage": "https://github.com/hamzaabdulwahab/bonjou-terminal",
   "license": "MIT",
   "architecture": {
     "64bit": {
-  "url": "https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.8/bonjou-windows.zip",
-  "hash": "778c9fdb6dc5221013ad1a3fa93fa234b1ba0c1e0b1d7b6bc39a083c3e07d5d3",
+  "url": "https://github.com/hamzaabdulwahab/bonjou-terminal/releases/download/v1.0.9/bonjou-windows.zip",
+  "hash": "1adb0e5df7b258b987d743f271647804fff9113bc2d6d0c030f987e445242df5",
       "bin": "bonjou.exe"
     }
   },

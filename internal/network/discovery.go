@@ -44,6 +44,15 @@ type DiscoveryService struct {
 	localPort int
 }
 
+func (d *DiscoveryService) isStopping() bool {
+	select {
+	case <-d.stop:
+		return true
+	default:
+		return false
+	}
+}
+
 func NewDiscoveryService(cfg *config.Config, logger *logger.Logger) *DiscoveryService {
 	return &DiscoveryService{
 		cfg:    cfg,
@@ -110,7 +119,7 @@ func (d *DiscoveryService) UpdateLocalEndpoint(ip string, port int) {
 
 // ForceAnnounce immediately broadcasts the latest local identity.
 func (d *DiscoveryService) ForceAnnounce() {
-	if !d.started {
+	if !d.started || d.isStopping() {
 		return
 	}
 	payload, ok := d.prepareAnnouncement()
@@ -197,6 +206,9 @@ func (d *DiscoveryService) listenLoop() {
 	defer conn.Close()
 	buf := make([]byte, 1024)
 	for {
+		if d.isStopping() {
+			return
+		}
 		conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 		n, remote, err := conn.ReadFromUDP(buf)
 		if err != nil {
@@ -337,6 +349,9 @@ func (d *DiscoveryService) writeAnnouncement(conn *net.UDPConn, payload []byte, 
 	for _, addr := range addrs {
 		if addr == nil {
 			continue
+		}
+		if d.isStopping() {
+			return
 		}
 		if _, err := conn.WriteToUDP(payload, addr); err != nil {
 			d.logger.Error("discovery announce to %s: %v", addr, err)
