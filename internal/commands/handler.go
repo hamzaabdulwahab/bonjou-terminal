@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -207,7 +208,16 @@ func (h *Handler) cmdFolder(parts []string, args string) (Result, error) {
 }
 
 func (h *Handler) cmdMulti(parts []string, args string) (Result, error) {
-	targetsPart, payload, ok := splitMultiArgs(args)
+	// Check for --sequential flag (manual override)
+	forceSequential := false
+	argsToProcess := args
+	if strings.HasPrefix(strings.TrimSpace(args), "--sequential ") || strings.HasPrefix(strings.TrimSpace(args), "--seq ") {
+		forceSequential = true
+		argsToProcess = strings.TrimPrefix(strings.TrimSpace(args), "--sequential ")
+		argsToProcess = strings.TrimPrefix(strings.TrimSpace(argsToProcess), "--seq ")
+	}
+
+	targetsPart, payload, ok := splitMultiArgs(argsToProcess)
 	if !ok {
 		return Result{Output: "Usage: @multi <u1,u2,...> <message|file>"}, nil
 	}
@@ -219,38 +229,163 @@ func (h *Handler) cmdMulti(parts []string, args string) (Result, error) {
 			payloadIsDir = info.IsDir()
 		}
 	}
-	var errs []string
-	var success int
+
+	// Parse targets
+	var targets []string
 	for _, target := range strings.Split(targetsPart, ",") {
 		target = strings.TrimSpace(target)
-		if target == "" {
-			continue
+		if target != "" {
+			targets = append(targets, target)
 		}
-		peer, err := h.resolvePeer(target)
-		if err != nil {
-			errs = append(errs, fmt.Sprintf("%s: %v", target, err))
-			continue
-		}
-		if payloadPath != "" {
-			if payloadIsDir {
-				err = h.session.Transfer.SendFolder(peer, payloadPath)
-			} else {
-				err = h.session.Transfer.SendFile(peer, payloadPath)
-			}
-		} else {
-			err = h.session.Transfer.SendMessage(peer, payload)
-		}
-		if err != nil {
-			errs = append(errs, fmt.Sprintf("%s: %v", target, err))
-			continue
-		}
-		success++
 	}
+
+	if len(targets) == 0 {
+		return Result{Output: "No valid targets specified"}, nil
+	}
+
+	var errs []string
+	var success int
+	var failureCount int
+	var mu sync.Mutex
+
+	if forceSequential {
+		// Forced sequential mode
+		for _, target := range targets {
+			peer, err := h.resolvePeer(target)
+			if err != nil {
+				errs = append(errs, fmt.Sprintf("%s: %v", target, err))
+				failureCount++
+				continue
+			}
+
+			if payloadPath != "" {
+				if payloadIsDir {
+					err = h.session.Transfer.SendFolder(peer, payloadPath)
+				} else {
+					err = h.session.Transfer.SendFile(peer, payloadPath)
+				}
+			} else {
+				err = h.session.Transfer.SendMessage(peer, payload)
+			}
+
+			if err != nil {
+				errs = append(errs, fmt.Sprintf("%s: %v", target, err))
+				failureCount++
+			} else {
+				success++
+			}
+		}
+	} else {
+		// Try parallel first, auto-fallback to sequential on failures
+		var wg sync.WaitGroup
+		parallelFailed := false
+
+		// Phase 1: Attempt parallel transfers
+		for _, target := range targets {
+			wg.Add(1)
+			go func(target string) {
+				defer wg.Done()
+
+				peer, err := h.resolvePeer(target)
+				if err != nil {
+					mu.Lock()
+					errs = append(errs, fmt.Sprintf("%s: %v", target, err))
+					failureCount++
+					parallelFailed = true
+					mu.Unlock()
+					return
+				}
+
+				if payloadPath != "" {
+					if payloadIsDir {
+						err = h.session.Transfer.SendFolder(peer, payloadPath)
+					} else {
+						err = h.session.Transfer.SendFile(peer, payloadPath)
+					}
+				} else {
+					err = h.session.Transfer.SendMessage(peer, payload)
+				}
+
+				mu.Lock()
+				if err != nil {
+					errs = append(errs, fmt.Sprintf("%s: %v", target, err))
+					failureCount++
+					parallelFailed = true
+				} else {
+					success++
+				}
+				mu.Unlock()
+			}(target)
+		}
+
+		wg.Wait()
+
+		// If parallel had significant failures and we have more targets, try sequential fallback
+		if parallelFailed && failureCount > 0 && failureCount < len(targets) {
+			// Find failed targets and retry sequentially
+			failedTargets := extractFailedTargets(errs, targets)
+			if len(failedTargets) > 0 {
+				// Clear previous errors for retry
+				errs = nil
+				failureCount = 0
+
+				for _, target := range failedTargets {
+					peer, err := h.resolvePeer(target)
+					if err != nil {
+						errs = append(errs, fmt.Sprintf("%s (sequential retry): %v", target, err))
+						failureCount++
+						continue
+					}
+
+					if payloadPath != "" {
+						if payloadIsDir {
+							err = h.session.Transfer.SendFolder(peer, payloadPath)
+						} else {
+							err = h.session.Transfer.SendFile(peer, payloadPath)
+						}
+					} else {
+						err = h.session.Transfer.SendMessage(peer, payload)
+					}
+
+					if err != nil {
+						errs = append(errs, fmt.Sprintf("%s (sequential retry): %v", target, err))
+						failureCount++
+					} else {
+						success++
+					}
+				}
+			}
+		}
+	}
+
 	if len(errs) > 0 {
 		return Result{Output: fmt.Sprintf("Completed %d transfers, %d errors:\n%s", success, len(errs), strings.Join(errs, "\n"))}, nil
 	}
 
 	return Result{Output: fmt.Sprintf("Completed %d transfers", success)}, nil
+}
+
+// extractFailedTargets parses error messages to find which targets failed
+func extractFailedTargets(errs []string, allTargets []string) []string {
+	failedSet := make(map[string]bool)
+	for _, errMsg := range errs {
+		// Error format: "target: error message"
+		parts := strings.SplitN(errMsg, ":", 2)
+		if len(parts) > 0 {
+			target := strings.TrimSpace(parts[0])
+			// Remove retry suffix if present
+			target = strings.TrimSuffix(target, " (sequential retry)")
+			failedSet[target] = true
+		}
+	}
+
+	var failed []string
+	for _, target := range allTargets {
+		if failedSet[target] {
+			failed = append(failed, target)
+		}
+	}
+	return failed
 }
 
 func (h *Handler) cmdBroadcast(message string) (Result, error) {
@@ -554,6 +689,7 @@ func helpText() string {
 	b.WriteString("    Direct message a peer by username, hostname, or IP." + "\n")
 	b.WriteString("  " + accent + "@multi <user1,user2,...> <message|path>" + reset + "\n")
 	b.WriteString("    Target a list of peers; send chat text, a file, or a folder." + "\n")
+	b.WriteString("    Automatically uses parallel for speed; falls back to sequential if transfers fail." + "\n")
 	b.WriteString("  " + accent + "@broadcast <message>" + reset + "\n")
 	b.WriteString("    Push the same announcement to every discovered peer." + "\n\n")
 
