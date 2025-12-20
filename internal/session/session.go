@@ -1,6 +1,8 @@
 package session
 
 import (
+	"sync"
+
 	"github.com/hamzawahab/bonjou-terminal/internal/config"
 	"github.com/hamzawahab/bonjou-terminal/internal/events"
 	"github.com/hamzawahab/bonjou-terminal/internal/history"
@@ -16,7 +18,9 @@ type Session struct {
 	Discovery *network.DiscoveryService
 	Transfer  *network.TransferService
 	Events    chan events.Event
-	LocalIP   string
+
+	mu      sync.RWMutex
+	localIP string
 }
 
 func New(cfg *config.Config, log *logger.Logger, hist *history.Manager, disc *network.DiscoveryService, transfer *network.TransferService, events chan events.Event, ip string) *Session {
@@ -27,7 +31,7 @@ func New(cfg *config.Config, log *logger.Logger, hist *history.Manager, disc *ne
 		Discovery: disc,
 		Transfer:  transfer,
 		Events:    events,
-		LocalIP:   ip,
+		localIP:   ip,
 	}
 }
 
