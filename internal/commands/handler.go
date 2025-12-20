@@ -120,11 +120,17 @@ func (h *Handler) cmdConnect(args string) (Result, error) {
 }
 
 func (h *Handler) cmdScan() (Result, error) {
-	// Scan all 192.168.x.x subnets (1-255)
+	// Scan all subnets in the local network range (1-255)
+	// For 10.x.x.x networks, also scans nearby second octets (±5)
 	go func() {
 		h.session.Discovery.ScanSubnets(1, 255)
 	}()
-	return Result{Output: "Scanning all subnets (192.168.1-255.x)... This takes about 2 minutes.\nBonjou users will appear in @users as they respond."}, nil
+	localIP := h.session.LocalIP()
+	parts := strings.Split(localIP, ".")
+	if len(parts) >= 2 && parts[0] == "10" {
+		return Result{Output: fmt.Sprintf("Scanning subnets 10.%s-±5.x.x... This may take a few minutes.\nBonjou users will appear in @users as they respond.", parts[1])}, nil
+	}
+	return Result{Output: fmt.Sprintf("Scanning all subnets in %s.%s.x.x... This takes about 2 minutes.\nBonjou users will appear in @users as they respond.", parts[0], parts[1])}, nil
 }
 
 func (h *Handler) cmdSend(parts []string, args string) (Result, error) {

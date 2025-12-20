@@ -189,7 +189,7 @@ func (d *DiscoveryService) AddManualPeer(ip string, port int) error {
 		port = d.cfg.ListenPort
 	}
 
-	// Send direct announcement to the target IP
+	// Send direct announcement to the target IP multiple times for reliability
 	payload, ok := d.prepareAnnouncement()
 	if !ok {
 		return errors.New("failed to prepare announcement")
@@ -202,19 +202,21 @@ func (d *DiscoveryService) AddManualPeer(ip string, port int) error {
 	defer conn.Close()
 
 	target := &net.UDPAddr{IP: net.ParseIP(ip), Port: d.cfg.DiscoveryPort}
-	if _, err := conn.WriteToUDP(payload, target); err != nil {
-		return err
+	
+	// Send 3 times with small delay for reliability
+	for i := 0; i < 3; i++ {
+		if _, err := conn.WriteToUDP(payload, target); err != nil {
+			return err
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
-
-	// Don't add to peer list yet - wait for them to respond
-	// When they receive our announcement, they'll send theirs back
-	// and we'll add them in listenLoop()
 
 	return nil
 }
 
 // ScanSubnets scans multiple subnets to find Bonjou peers.
-// It sends announcements to all IPs in the given subnet range.
+// It detects the local network prefix and scans that range.
+// For 10.x.x.x networks, it also scans nearby second octets (±5).
 // Peers running Bonjou will respond and appear in ListPeers().
 func (d *DiscoveryService) ScanSubnets(startSubnet, endSubnet int) int {
 	if d.isStopping() {
@@ -233,15 +235,22 @@ func (d *DiscoveryService) ScanSubnets(startSubnet, endSubnet int) int {
 	}
 	defer conn.Close()
 
-	// Get our local subnet to skip it (already covered by broadcast)
+	// Get our local IP to determine network prefix
 	d.localMu.RLock()
 	localIP := d.localIP
 	d.localMu.RUnlock()
 
-	localSubnet := 0
-	if parts := net.ParseIP(localIP).To4(); parts != nil {
-		localSubnet = int(parts[2])
+	parts := net.ParseIP(localIP).To4()
+	if parts == nil {
+		d.logger.Error("invalid local IP for scanning")
+		return 0
 	}
+
+	// Determine network prefix
+	prefix1 := int(parts[0])
+	prefix2 := int(parts[1])
+	localSubnet := int(parts[2])
+	localHost := int(parts[3])
 
 	sent := 0
 	// Use worker pool for parallel scanning
@@ -263,18 +272,35 @@ func (d *DiscoveryService) ScanSubnets(startSubnet, endSubnet int) int {
 		}()
 	}
 
-	// Send jobs for all IPs in range
-	for subnet := startSubnet; subnet <= endSubnet; subnet++ {
-		if subnet == localSubnet {
-			continue // Skip our own subnet, broadcast handles it
-		}
-		for host := 1; host <= 254; host++ {
-			if d.isStopping() {
-				break
+	// Determine which second octets to scan
+	// For 10.x.x.x and 172.x.x.x networks, scan nearby second octets (±5)
+	// For 192.168.x.x, just scan 192.168.x.x
+	secondOctets := []int{prefix2}
+	if prefix1 == 10 || (prefix1 == 172 && prefix2 >= 16 && prefix2 <= 31) {
+		// Large private network - scan nearby second octets
+		for delta := -5; delta <= 5; delta++ {
+			p2 := prefix2 + delta
+			if p2 >= 0 && p2 <= 255 && p2 != prefix2 {
+				secondOctets = append(secondOctets, p2)
 			}
-			ip := fmt.Sprintf("192.168.%d.%d", subnet, host)
-			jobs <- ip
-			sent++
+		}
+	}
+
+	// Send jobs for all IPs in range
+	for _, p2 := range secondOctets {
+		for subnet := startSubnet; subnet <= endSubnet; subnet++ {
+			for host := 1; host <= 254; host++ {
+				if d.isStopping() {
+					break
+				}
+				// Skip our own IP
+				if p2 == prefix2 && subnet == localSubnet && host == localHost {
+					continue
+				}
+				ip := fmt.Sprintf("%d.%d.%d.%d", prefix1, p2, subnet, host)
+				jobs <- ip
+				sent++
+			}
 		}
 	}
 	close(jobs)
@@ -283,16 +309,18 @@ func (d *DiscoveryService) ScanSubnets(startSubnet, endSubnet int) int {
 	return sent
 }
 
-// StartupScan performs initial scan of common university subnets.
-// Called automatically when Bonjou starts.
+// StartupScan performs initial scan of nearby subnets in the local network.
+// Called automatically when Bonjou starts. Scans subnets 1-50 for quick discovery.
+// Use @scan for a full scan of all subnets.
 func (d *DiscoveryService) StartupScan() {
 	if d.isStopping() {
 		return
 	}
-	// Scan subnets 1-20 on startup (covers most university labs)
+	// Scan nearby subnets (1-50) on startup for quick peer discovery
+	// Full scan (1-255) available via @scan command
 	go func() {
 		time.Sleep(2 * time.Second) // Wait for listener to be ready
-		d.ScanSubnets(1, 20)
+		d.ScanSubnets(1, 50)
 	}()
 }
 
@@ -391,7 +419,11 @@ func (d *DiscoveryService) sendDirectAnnouncement(ip string) {
 	}
 	defer conn.Close()
 	target := &net.UDPAddr{IP: net.ParseIP(ip), Port: d.cfg.DiscoveryPort}
-	conn.WriteToUDP(payload, target)
+	// Send 3 times for reliability
+	for i := 0; i < 3; i++ {
+		conn.WriteToUDP(payload, target)
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func (d *DiscoveryService) announceLoop() {
