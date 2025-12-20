@@ -5,7 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +21,18 @@ type Manager struct {
 
 func New(cfg *config.Config) *Manager {
 	return &Manager{cfg: cfg}
+}
+
+// Entry represents a single history record.
+type Entry struct {
+	Timestamp time.Time
+	Category  string
+	Kind      string
+	From      string
+	To        string
+	Message   string
+	Path      string
+	Size      int64
 }
 
 func (m *Manager) chatLogPath() string {
@@ -54,19 +68,41 @@ func (m *Manager) append(path, entry string) error {
 	return err
 }
 
-func (m *Manager) ReadAll() ([]string, error) {
+func (m *Manager) ReadAll() ([]Entry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	var entries []Entry
+
 	chats, err := readLines(m.chatLogPath())
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
+	for _, line := range chats {
+		entry, err := parseChatEntry(line)
+		if err != nil {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+
 	transfers, err := readLines(m.transferLogPath())
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	out := append(chats, transfers...)
-	return out, nil
+	for _, line := range transfers {
+		entry, err := parseTransferEntry(line)
+		if err != nil {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Timestamp.Before(entries[j].Timestamp)
+	})
+
+	return entries, nil
 }
 
 func (m *Manager) Clear() error {
@@ -93,4 +129,57 @@ func readLines(path string) ([]string, error) {
 		lines = append(lines, scanner.Text())
 	}
 	return lines, scanner.Err()
+}
+
+func parseChatEntry(line string) (Entry, error) {
+	parts := strings.SplitN(line, " | ", 4)
+	if len(parts) < 4 {
+		return Entry{}, errors.New("invalid chat history entry")
+	}
+	ts, err := time.Parse(time.RFC3339, parts[0])
+	if err != nil {
+		return Entry{}, err
+	}
+	from, to := parseEndpoints(parts[2])
+	return Entry{
+		Timestamp: ts,
+		Category:  "chat",
+		Kind:      "message",
+		From:      from,
+		To:        to,
+		Message:   parts[3],
+	}, nil
+}
+
+func parseTransferEntry(line string) (Entry, error) {
+	parts := strings.SplitN(line, " | ", 6)
+	if len(parts) < 6 {
+		return Entry{}, errors.New("invalid transfer history entry")
+	}
+	ts, err := time.Parse(time.RFC3339, parts[0])
+	if err != nil {
+		return Entry{}, err
+	}
+	from, to := parseEndpoints(parts[3])
+	size, err := strconv.ParseInt(strings.TrimPrefix(parts[5], "bytes="), 10, 64)
+	if err != nil {
+		size = 0
+	}
+	return Entry{
+		Timestamp: ts,
+		Category:  "transfer",
+		Kind:      parts[2],
+		From:      from,
+		To:        to,
+		Path:      parts[4],
+		Size:      size,
+	}, nil
+}
+
+func parseEndpoints(segment string) (string, string) {
+	parts := strings.SplitN(segment, " -> ", 2)
+	if len(parts) != 2 {
+		return "", ""
+	}
+	return parts[0], parts[1]
 }

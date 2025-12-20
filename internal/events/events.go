@@ -33,9 +33,15 @@ type Event struct {
 
 // ProgressState models transfer progress updates.
 type ProgressState struct {
-	ID      string
-	Current int64
-	Total   int64
-	Label   string
-	Done    bool
+	ID        string
+	Current   int64
+	Total     int64
+	Label     string
+	Done      bool
+	Path      string
+	Peer      string
+	Direction string
+	Kind      string
+	StartedAt time.Time
+	UpdatedAt time.Time
 }
