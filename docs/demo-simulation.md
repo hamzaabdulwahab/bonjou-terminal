@@ -10,7 +10,7 @@ This shows how to use Bonjou between two computers. You can also test on one com
 
 ## Example Session
 
-### Computer 1 (Alex)
+### Computer 1 (Hamza)
 
 Start Bonjou:
 ```bash
@@ -23,12 +23,12 @@ Check your info:
 ```
 Output:
 ```
-Username: alex
+Username: hamza
 IP: 192.168.1.10
 Port: 46321
 ```
 
-### Computer 2 (Jamie)
+### Computer 2 (Hassan)
 
 Start Bonjou:
 ```bash
@@ -41,21 +41,21 @@ See who is on the network:
 ```
 Output:
 ```
-alex (192.168.1.10)
+hamza (192.168.1.10)
 ```
 
 Send a message:
 ```
-@send alex Hey Alex!
+@send hamza Hey Hamza!
 ```
 
-Alex will see the message appear.
+Hamza will see the message appear.
 
 ## Send a File
 
-On Jamie's computer:
+On Hassan's computer:
 ```
-@file alex ~/Documents/notes.pdf
+@file hamza ~/Documents/notes.pdf
 ```
 
 You will see progress:
@@ -63,21 +63,21 @@ You will see progress:
 Sending notes.pdf... 45%... 100% done
 ```
 
-Alex receives it in:
+Hamza receives it in:
 ```
 ~/.bonjou/received/files/notes.pdf
 ```
 
 ## Send a Folder
 
-On Alex's computer:
+On Hamza's computer:
 ```
-@folder jamie ./project-files
+@folder hassan ./project-files
 ```
 
 Bonjou zips the folder, sends it, and unzips on the other side.
 
-Jamie receives it in:
+Hassan receives it in:
 ```
 ~/.bonjou/received/folders/project-files/
 ```
