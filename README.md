@@ -15,13 +15,35 @@ Bonjou is a terminal-based chat app for local networks. You can send messages an
 
 ### Install
 
+**One command installer scripts:**
+
+macOS/Linux:
+```bash
+curl -fsSL https://raw.githubusercontent.com/hamzaabdulwahab/bonjou-cli/main/scripts/install.sh | bash
+```
+
+Windows (PowerShell):
+```powershell
+iwr https://raw.githubusercontent.com/hamzaabdulwahab/bonjou-cli/main/scripts/install.ps1 -useb | iex
+```
+
 **Mac (Homebrew):**
+```bash
+brew install hamzaabdulwahab/bonjou/bonjou
+```
+
+If you prefer the classic two-step flow:
 ```bash
 brew tap hamzaabdulwahab/bonjou https://github.com/hamzaabdulwahab/homebrew-bonjou
 brew install bonjou
 ```
 
 **Windows (Scoop):**
+```powershell
+scoop install https://raw.githubusercontent.com/hamzaabdulwahab/scoop-bonjou/main/bonjou.json
+```
+
+If you prefer the classic two-step flow:
 ```powershell
 scoop bucket add bonjou https://github.com/hamzaabdulwahab/scoop-bonjou
 scoop install bonjou
@@ -129,6 +151,7 @@ To build binaries:
 - [Commands](HELP.md)
 - [Install Guide](docs/install-guide.md)
 - [Demo](docs/demo-simulation.md)
+- [Package Registry Submission](docs/package-registry-submission.md)
 
 ## License
 

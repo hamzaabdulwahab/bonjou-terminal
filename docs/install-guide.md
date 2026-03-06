@@ -2,10 +2,34 @@
 
 Pick your operating system and follow the steps.
 
+## One Command Installer (Auto-detect)
+
+macOS/Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/hamzaabdulwahab/bonjou-cli/main/scripts/install.sh | bash
+```
+
+Windows (PowerShell):
+
+```powershell
+iwr https://raw.githubusercontent.com/hamzaabdulwahab/bonjou-cli/main/scripts/install.ps1 -useb | iex
+```
+
+What this does:
+- Uses Homebrew on macOS if available
+- Uses Scoop on Windows if available
+- Falls back to direct binary install when package managers are unavailable
+
 ## Mac
 
 ### Option 1: Homebrew (easiest)
 
+```bash
+brew install hamzaabdulwahab/bonjou/bonjou
+```
+
+If you prefer the classic two-step flow:
 ```bash
 brew tap hamzaabdulwahab/bonjou https://github.com/hamzaabdulwahab/homebrew-bonjou
 brew install bonjou
@@ -109,6 +133,11 @@ sudo mv bonjou /usr/local/bin/
 
 Open PowerShell:
 ```powershell
+scoop install https://raw.githubusercontent.com/hamzaabdulwahab/scoop-bonjou/main/bonjou.json
+```
+
+If you prefer the classic two-step flow:
+```powershell
 scoop bucket add bonjou https://github.com/hamzaabdulwahab/scoop-bonjou
 scoop install bonjou
 ```
@@ -194,3 +223,9 @@ Bonjou needs these ports open:
 - TCP 46321 (sending messages and files)
 
 If you cant see other users, check your firewall settings.
+
+## Want `brew install bonjou` and `scoop install bonjou`?
+
+See:
+
+- [Package Registry Submission Guide](package-registry-submission.md)

@@ -1,0 +1,26 @@
+diff --git a/bucket/bonjou.json b/bucket/bonjou.json
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/bucket/bonjou.json
+@@ -0,0 +1,20 @@
++{
++  "version": "1.1.0",
++  "description": "Terminal-based LAN chat and transfer application",
++  "homepage": "https://github.com/hamzaabdulwahab/bonjou-cli",
++  "license": "MIT",
++  "architecture": {
++    "64bit": {
++      "url": "https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v1.1.0/bonjou.exe",
++      "hash": "c3c6dd5fabf8f03128a92289547a3e8e4b74c46254497052f26349d0106210b6"
++    }
++  },
++  "bin": "bonjou.exe",
++  "persist": [
++    "AppData\\Bonjou"
++  ],
++  "checkver": "github",
++  "autoupdate": {
++    "url": "https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v$version/bonjou.exe"
++  }
++}
