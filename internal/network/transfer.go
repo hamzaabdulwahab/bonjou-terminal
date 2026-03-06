@@ -17,7 +17,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -271,6 +270,7 @@ func (t *TransferService) SendFile(peer *Peer, path string) error {
 		return t.copyWithProgress(writer, enc, path, env.Size, ctx)
 	}
 	if err := t.sendEnvelope(peer, env, stream); err != nil {
+		t.emitTransferIssue(kindFile, env.Name, peer.Username, path, err)
 		return err
 	}
 	t.emit(events.Event{Type: events.FileSent, Title: "File sent", Message: env.Name, To: peer.Username, Path: path, Size: env.Size, Timestamp: time.Now()})
@@ -326,6 +326,7 @@ func (t *TransferService) SendFolder(peer *Peer, dir string) error {
 		return t.copyWithProgress(writer, enc, archivePath, env.Size, ctx)
 	}
 	if err := t.sendEnvelope(peer, env, stream); err != nil {
+		t.emitTransferIssue(kindFolder, displayName, peer.Username, dir, err)
 		return err
 	}
 	t.emit(events.Event{Type: events.FolderSent, Title: "Folder sent", Message: displayName, To: peer.Username, Path: dir, Size: env.Size, Timestamp: time.Now()})
@@ -336,13 +337,15 @@ func (t *TransferService) sendEnvelope(peer *Peer, env *envelope, writer func(io
 	if t.isStopping() {
 		return errServiceStopping
 	}
-	if peer.Secret == "" {
-		return errors.New("peer secret unknown; ensure peer was discovered")
+	if strings.TrimSpace(peer.PublicKey) == "" {
+		return errors.New("peer public key unknown; update peer and rediscover")
 	}
-	shared := t.sharedKey(peer.Secret)
+	shared, err := t.sharedKey(peer.PublicKey)
+	if err != nil {
+		return err
+	}
 	var nonceBytes []byte
 	if writer != nil || env.Kind == kindMessage {
-		var err error
 		nonceBytes, err = randomNonce()
 		if err != nil {
 			return err
@@ -419,11 +422,14 @@ func (t *TransferService) signEnvelope(env *envelope, key []byte) string {
 }
 
 func (t *TransferService) verifyEnvelope(env *envelope) ([]byte, error) {
-	secret, ok := t.discovery.SharedSecret(env.From, env.FromIP)
-	if !ok || secret == "" {
+	publicKey, ok := t.discovery.SharedPublicKey(env.From, env.FromIP)
+	if !ok || publicKey == "" {
 		return nil, fmt.Errorf("discarded %s from %s (%s): peer not discovered yet", env.Kind, env.From, env.FromIP)
 	}
-	key := t.sharedKey(secret)
+	key, err := t.sharedKey(publicKey)
+	if err != nil {
+		return nil, fmt.Errorf("discarded %s from %s (%s): %w", env.Kind, env.From, env.FromIP, err)
+	}
 	expected := t.signEnvelope(env, key)
 	expectedBytes, err := hex.DecodeString(expected)
 	if err != nil {
@@ -444,7 +450,7 @@ func (t *TransferService) receiveFile(conn net.Conn, env *envelope, key []byte) 
 		return errServiceStopping
 	}
 	destPath := uniquePath(filepath.Join(t.cfg.ReceivedFilesDir, env.Name))
-	
+
 	// Security: Prevent path traversal attacks
 	absDestPath, err := filepath.Abs(destPath)
 	if err != nil {
@@ -457,7 +463,7 @@ func (t *TransferService) receiveFile(conn net.Conn, env *envelope, key []byte) 
 	if !strings.HasPrefix(absDestPath, absDirPath) {
 		return fmt.Errorf("path traversal not allowed: file would be written outside received directory")
 	}
-	
+
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
 		return err
 	}
@@ -496,6 +502,7 @@ func (t *TransferService) receiveFile(conn net.Conn, env *envelope, key []byte) 
 		dec = s
 	}
 	if err := t.readWithProgress(conn, dec, file, env.Size, hasher, ctx); err != nil {
+		t.emitTransferIssue(kindFile, env.Name, env.From, destPath, err)
 		return err
 	}
 	receivedChecksum := hex.EncodeToString(hasher.Sum(nil))
@@ -547,6 +554,7 @@ func (t *TransferService) receiveFolder(conn net.Conn, env *envelope, key []byte
 		dec = s
 	}
 	if err := t.readWithProgress(conn, dec, file, env.Size, hasher, ctx); err != nil {
+		t.emitTransferIssue(kindFolder, destDirName, env.From, displayPath, err)
 		return err
 	}
 	receivedChecksum := hex.EncodeToString(hasher.Sum(nil))
@@ -555,7 +563,7 @@ func (t *TransferService) receiveFolder(conn net.Conn, env *envelope, key []byte
 		return errors.New("checksum mismatch")
 	}
 	destDir := uniquePath(displayPath)
-	
+
 	// Security: Prevent path traversal attacks
 	absDestDir, err := filepath.Abs(destDir)
 	if err != nil {
@@ -568,12 +576,12 @@ func (t *TransferService) receiveFolder(conn net.Conn, env *envelope, key []byte
 	if !strings.HasPrefix(absDestDir, absFolderPath) {
 		return fmt.Errorf("path traversal not allowed: folder would be written outside received directory")
 	}
-	
+
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return err
 	}
 	if err := unzip(tempPath, destDir); err != nil {
-		_ = os.RemoveAll(destDir)  // Clean up partially extracted folder on failure
+		_ = os.RemoveAll(destDir) // Clean up partially extracted folder on failure
 		return err
 	}
 	t.emit(events.Event{Type: events.FolderReceived, Title: "Folder received", Message: destDirName, From: env.From, Path: destDir, Size: env.Size, Timestamp: time.Now()})
@@ -732,6 +740,39 @@ func (t *TransferService) emit(evt events.Event) {
 	}
 }
 
+func (t *TransferService) emitTransferIssue(kind, name, peer, path string, err error) {
+	if err == nil {
+		return
+	}
+	label := strings.TrimSpace(name)
+	if label == "" {
+		label = "payload"
+	}
+	who := strings.TrimSpace(peer)
+	if who == "" {
+		who = "peer"
+	}
+	if errors.Is(err, errServiceStopping) {
+		t.emit(events.Event{
+			Type:      events.Status,
+			Title:     "Transfer cancelled",
+			Message:   fmt.Sprintf("%s transfer cancelled for %s (%s)", kind, label, who),
+			From:      who,
+			Path:      path,
+			Timestamp: time.Now(),
+		})
+		return
+	}
+	t.emit(events.Event{
+		Type:      events.Error,
+		Title:     "Transfer failed",
+		Message:   fmt.Sprintf("%s transfer failed for %s (%s): %v", kind, label, who, err),
+		From:      who,
+		Path:      path,
+		Timestamp: time.Now(),
+	})
+}
+
 func randomNonce() ([]byte, error) {
 	nonce := make([]byte, aes.BlockSize)
 	if _, err := rand.Read(nonce); err != nil {
@@ -812,11 +853,15 @@ func (t *TransferService) UpdateLocalEndpoint(username, ip string) {
 	t.localMu.Unlock()
 }
 
-func (t *TransferService) sharedKey(peerSecret string) []byte {
-	parts := []string{t.cfg.Secret, peerSecret}
-	sort.Strings(parts)
-	sum := sha256.Sum256([]byte(parts[0] + ":" + parts[1]))
-	return sum[:]
+func (t *TransferService) sharedKey(peerPublicKey string) ([]byte, error) {
+	if strings.TrimSpace(peerPublicKey) == "" {
+		return nil, errors.New("missing peer public key")
+	}
+	key, err := sharedKeyFromPeerPublic(t.cfg.Secret, peerPublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("derive shared key from peer public key: %w", err)
+	}
+	return key, nil
 }
 
 func writeEnvelope(conn net.Conn, env *envelope) error {

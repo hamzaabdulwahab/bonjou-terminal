@@ -449,30 +449,31 @@ func (h *Handler) cmdSetName(arg string) (Result, error) {
 	if cfg.Username == sanitised {
 		return Result{Output: fmt.Sprintf("Username already set to %s", sanitised)}, nil
 	}
+	resolvedName := sanitised
+	collisionResolved := false
 	if h.session.Discovery != nil {
 		peers := h.session.Discovery.ListPeers()
-		for _, peer := range peers {
-			if strings.EqualFold(peer.Username, sanitised) {
-				return Result{Output: fmt.Sprintf("Username %s is currently in use by %s (%s). Choose a different name.", sanitised, peer.Username, peer.IP)}, nil
-			}
-		}
+		resolvedName, collisionResolved = resolveUniqueUsername(sanitised, h.session.LocalIP(), peers)
 	}
 	old := cfg.Username
-	cfg.Username = sanitised
+	cfg.Username = resolvedName
 	if err := cfg.Save(); err != nil {
 		cfg.Username = old
 		return Result{}, err
 	}
 	if h.session.Transfer != nil {
-		h.session.Transfer.UpdateLocalUser(sanitised)
+		h.session.Transfer.UpdateLocalUser(resolvedName)
 	}
 	if h.session.Discovery != nil {
-		h.session.Discovery.UpdateLocalUser(sanitised)
+		h.session.Discovery.UpdateLocalUser(resolvedName)
 		h.session.Discovery.ForceAnnounce()
 	}
-	msg := fmt.Sprintf("Username updated to %s", sanitised)
+	msg := fmt.Sprintf("Username updated to %s", resolvedName)
 	if changed {
 		msg += " (spaces converted to '-')"
+	}
+	if collisionResolved {
+		msg += fmt.Sprintf(" (requested name %s was in use)", sanitised)
 	}
 	return Result{Output: msg}, nil
 }
@@ -611,6 +612,73 @@ func sanitiseUsername(input string) (string, bool) {
 	}
 	joined := strings.Join(parts, "-")
 	return joined, joined != trimmed
+}
+
+func resolveUniqueUsername(base, localIP string, peers []network.Peer) (string, bool) {
+	if !usernameTaken(base, peers) {
+		return base, false
+	}
+	suffix := usernameCollisionSuffix(localIP)
+	candidate := appendUsernameSuffix(base, suffix)
+	if !usernameTaken(candidate, peers) {
+		return candidate, true
+	}
+	for i := 2; ; i++ {
+		candidate = appendUsernameSuffix(base, fmt.Sprintf("%s-%d", suffix, i))
+		if !usernameTaken(candidate, peers) {
+			return candidate, true
+		}
+	}
+}
+
+func usernameTaken(candidate string, peers []network.Peer) bool {
+	for _, peer := range peers {
+		if strings.EqualFold(peer.Username, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func usernameCollisionSuffix(localIP string) string {
+	ip := net.ParseIP(strings.TrimSpace(localIP))
+	if ip4 := ip.To4(); ip4 != nil {
+		return fmt.Sprintf("%d-%d", ip4[2], ip4[3])
+	}
+	if ip != nil {
+		raw := ip.String()
+		if raw != "" {
+			raw = strings.ReplaceAll(raw, ":", "-")
+			raw = strings.Trim(raw, "-")
+			if raw != "" {
+				if len(raw) > 12 {
+					raw = raw[len(raw)-12:]
+				}
+				return raw
+			}
+		}
+	}
+	return "peer"
+}
+
+func appendUsernameSuffix(base, suffix string) string {
+	const maxUsernameLen = 64
+	base = strings.TrimSpace(base)
+	suffix = strings.Trim(strings.TrimSpace(suffix), "-")
+	if base == "" {
+		base = "bonjou-user"
+	}
+	if suffix == "" {
+		suffix = "peer"
+	}
+	available := maxUsernameLen - len(suffix) - 1
+	if available < 1 {
+		available = 1
+	}
+	if len(base) > available {
+		base = base[:available]
+	}
+	return base + "-" + suffix
 }
 
 func normalizePathArg(input string) (string, error) {

@@ -15,11 +15,11 @@ import (
 
 // Peer represents an active Bonjou device on the LAN.
 type Peer struct {
-	Username string
-	IP       string
-	Port     int
-	LastSeen time.Time
-	Secret   string
+	Username  string
+	IP        string
+	Port      int
+	LastSeen  time.Time
+	PublicKey string
 }
 
 type announcement struct {
@@ -27,7 +27,7 @@ type announcement struct {
 	IP        string `json:"ip"`
 	Port      int    `json:"port"`
 	Timestamp int64  `json:"ts"`
-	Secret    string `json:"secret"`
+	PublicKey string `json:"public_key,omitempty"`
 }
 
 // DiscoveryService handles LAN peer discovery over UDP broadcasts.
@@ -152,7 +152,7 @@ func (d *DiscoveryService) ListPeers() []Peer {
 			continue
 		}
 		clone := *peer
-		clone.Secret = ""
+		clone.PublicKey = ""
 		out = append(out, clone)
 	}
 	return out
@@ -217,21 +217,21 @@ func sameSubnetIPv4(senderIP, localIP string) bool {
 	return sender[0] == local[0] && sender[1] == local[1] && sender[2] == local[2]
 }
 
-// SharedSecret retrieves the most recent secret advertised by a peer.
-func (d *DiscoveryService) SharedSecret(username, ip string) (string, bool) {
+// SharedPublicKey returns the most recent public key advertised by a peer.
+func (d *DiscoveryService) SharedPublicKey(username, ip string) (string, bool) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	if ip != "" {
-		if peer, ok := d.peers[ip]; ok {
-			if peer.Secret != "" {
-				return peer.Secret, true
+		if peer, exists := d.peers[ip]; exists {
+			if peer.PublicKey != "" {
+				return peer.PublicKey, true
 			}
 		}
 	}
 	if username != "" {
 		for _, peer := range d.peers {
-			if peer.Username == username && peer.Secret != "" {
-				return peer.Secret, true
+			if peer.Username == username && peer.PublicKey != "" {
+				return peer.PublicKey, true
 			}
 		}
 	}
@@ -297,7 +297,7 @@ func (d *DiscoveryService) listenLoop() {
 
 		// IMPORTANT: Trust the packet source IP for routing/reachability.
 		// Payload IP can be wrong if the sender picked the wrong interface (VPN/Docker/etc.).
-		peer := &Peer{Username: ann.Username, IP: senderIP, Port: ann.Port, LastSeen: time.Now(), Secret: ann.Secret}
+		peer := &Peer{Username: ann.Username, IP: senderIP, Port: ann.Port, LastSeen: time.Now(), PublicKey: ann.PublicKey}
 		d.mu.Lock()
 		d.peers[peer.IP] = peer
 		d.mu.Unlock()
@@ -339,8 +339,13 @@ func (d *DiscoveryService) sendCurrentAnnouncement(conn *net.UDPConn) {
 }
 
 func (d *DiscoveryService) prepareAnnouncement() ([]byte, bool) {
+	pubKey, err := localPublicKeyFromSecret(d.cfg.Secret)
+	if err != nil {
+		d.logger.Error("derive discovery public key: %v", err)
+		return nil, false
+	}
 	d.localMu.RLock()
-	ann := announcement{Username: d.localUser, IP: d.localIP, Port: d.localPort, Timestamp: time.Now().Unix(), Secret: d.cfg.Secret}
+	ann := announcement{Username: d.localUser, IP: d.localIP, Port: d.localPort, Timestamp: time.Now().Unix(), PublicKey: pubKey}
 	d.localMu.RUnlock()
 	if ann.IP == "" || ann.Port == 0 {
 		return nil, false
