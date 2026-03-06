@@ -30,12 +30,12 @@ scoop install bonjou
 **Linux (Ubuntu/Debian):**
 ```bash
 # For Intel/AMD (most PCs, cloud VMs)
-wget https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v1.0.0/bonjou_1.0.0_amd64.deb
-sudo dpkg -i bonjou_1.0.0_amd64.deb
+wget https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v1.1.0/bonjou_1.1.0_amd64.deb
+sudo dpkg -i bonjou_1.1.0_amd64.deb
 
 # For ARM64 (Mac with Docker/Parallels, Raspberry Pi)
-wget https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v1.0.0/bonjou_1.0.0_arm64.deb
-sudo dpkg -i bonjou_1.0.0_arm64.deb
+wget https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v1.1.0/bonjou_1.1.0_arm64.deb
+sudo dpkg -i bonjou_1.1.0_arm64.deb
 ```
 
 Or download from [Releases](https://github.com/hamzaabdulwahab/bonjou-cli/releases).
@@ -48,7 +48,7 @@ bonjou
 
 You will see:
 ```
-🌐 Welcome to Bonjou v1.0.0
+🌐 Welcome to Bonjou v1.1.0
 👤 User: hamza | IP: 192.168.1.5
 📡 LAN: Connected
 Type @help for commands.
@@ -65,6 +65,24 @@ Type @help for commands.
 @help                           # see all commands
 @exit                           # quit
 ```
+
+## Transfer Status Semantics
+
+When you send a file or folder, Bonjou shows two stages:
+
+- `Folder sent: 'Books' to abd (waiting for delivery confirmation)`
+	- Your device finished uploading bytes to the peer.
+	- This does not yet mean the peer has extracted/saved the folder.
+
+- `Delivered: Folder 'Books' to abd`
+	- The receiver finished processing the transfer and sent an app-level ACK.
+	- This is the success confirmation you should rely on.
+
+If something fails on the receiver side, you should see:
+
+- `Delivery failed: Folder 'Books' to abd`
+
+Repeated sends are allowed. If the same name already exists, Bonjou saves into a unique destination (for example `Books`, then `Books_1`, `Books_2`, ...).
 
 ## Discovery Scope
 

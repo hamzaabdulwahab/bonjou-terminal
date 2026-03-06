@@ -167,16 +167,28 @@ func (u *UI) renderEvent(evt events.Event) {
 	ts := time.Now().Format("15:04:05")
 	switch evt.Type {
 	case events.MessageReceived:
-		u.writeLine(fmt.Sprintf("%s[%s] %s ➜ You:%s %s", colorPrimary, ts, safe(evt.From), colorReset, evt.Message))
+		u.writeLine(fmt.Sprintf("%s[%s] Message from %s:%s %s", colorPrimary, ts, safe(evt.From), colorReset, evt.Message))
 	case events.MessageSent:
-		u.writeLine(fmt.Sprintf("%s[%s] You ➜ %s:%s %s", colorMuted, ts, safe(evt.To), colorReset, evt.Message))
+		u.writeLine(fmt.Sprintf("%s[%s] Message sent to %s:%s %s", colorMuted, ts, safe(evt.To), colorReset, evt.Message))
 	case events.FileReceived, events.FolderReceived:
-		u.writeLine(fmt.Sprintf("%s[%s] Received %s from %s -> %s%s", colorPrimary, ts, safe(evt.Message), safe(evt.From), evt.Path, colorReset))
+		itemKind := "File"
+		if evt.Type == events.FolderReceived {
+			itemKind = "Folder"
+		}
+		u.writeLine(fmt.Sprintf("%s[%s] %s received: '%s' from %s -> %s%s", colorPrimary, ts, itemKind, safe(evt.Message), safe(evt.From), evt.Path, colorReset))
 	case events.FileSent, events.FolderSent:
-		u.writeLine(fmt.Sprintf("%s[%s] Sent %s to %s%s", colorMuted, ts, safe(evt.Message), safe(evt.To), colorReset))
+		itemKind := "File"
+		if evt.Type == events.FolderSent {
+			itemKind = "Folder"
+		}
+		u.writeLine(fmt.Sprintf("%s[%s] %s sent: '%s' to %s (waiting for delivery confirmation)%s", colorMuted, ts, itemKind, safe(evt.Message), safe(evt.To), colorReset))
 	case events.Error:
-		u.writeLine(fmt.Sprintf("%s[%s] %s%s", colorError, ts, safe(evt.Message), colorReset))
+		u.writeLine(fmt.Sprintf("%s[%s] ERROR: %s%s", colorError, ts, safe(evt.Message), colorReset))
 	case events.Status:
+		if strings.EqualFold(strings.TrimSpace(evt.Title), "Delivery confirmed") || strings.HasPrefix(strings.TrimSpace(evt.Message), "Delivered:") {
+			u.writeLine(fmt.Sprintf("%s[%s] %s%s", colorSuccess, ts, safe(evt.Message), colorReset))
+			return
+		}
 		u.writeLine(fmt.Sprintf("%s[%s] %s%s", colorMuted, ts, safe(evt.Message), colorReset))
 	case events.Progress:
 		u.renderProgress(evt)

@@ -31,6 +31,8 @@ const (
 	kindMessage = "message"
 	kindFile    = "file"
 	kindFolder  = "folder"
+	kindAck     = "ack"
+	ackTimeout  = 12 * time.Second
 )
 
 var errServiceStopping = errors.New("transfer service stopping")
@@ -49,6 +51,15 @@ type envelope struct {
 	Encrypted bool   `json:"encrypted,omitempty"`
 	Nonce     string `json:"nonce,omitempty"`
 	Encoding  string `json:"encoding,omitempty"`
+	AckKind   string `json:"ack_kind,omitempty"`
+	AckStatus string `json:"ack_status,omitempty"`
+}
+
+type sealedEnvelope struct {
+	Nonce    string `json:"nonce"`
+	Payload  string `json:"payload"`
+	HMAC     string `json:"hmac"`
+	Encoding string `json:"encoding,omitempty"`
 }
 
 type progressContext struct {
@@ -84,6 +95,8 @@ type TransferService struct {
 	localMu      sync.RWMutex
 	chunkSize    int
 	chunkTimeout time.Duration
+	pendingAckMu sync.Mutex
+	pendingAcks  map[string]chan *envelope
 }
 
 func (t *TransferService) isStopping() bool {
@@ -105,6 +118,7 @@ func NewTransferService(cfg *config.Config, logger *logger.Logger, history *hist
 		stop:         make(chan struct{}),
 		chunkSize:    cfg.ChunkSizeBytes(),
 		chunkTimeout: cfg.ChunkTimeout(),
+		pendingAcks:  make(map[string]chan *envelope),
 	}
 }
 
@@ -172,11 +186,11 @@ func (t *TransferService) handleConnection(conn net.Conn) error {
 	if t.isStopping() {
 		return errServiceStopping
 	}
-	env, err := readEnvelope(conn)
+	env, key, err := t.readSecureEnvelope(conn)
 	if err != nil {
 		return err
 	}
-	key, err := t.verifyEnvelope(env)
+	err = t.verifyEnvelope(env, key)
 	if err != nil {
 		t.logger.Error("verify envelope failed: %v", err)
 		t.emit(events.Event{Type: events.Error, Title: "Rejected incoming payload", Message: err.Error(), From: env.From, Timestamp: time.Now()})
@@ -204,6 +218,8 @@ func (t *TransferService) handleConnection(conn net.Conn) error {
 		return t.receiveFile(conn, env, key)
 	case kindFolder:
 		return t.receiveFolder(conn, env, key)
+	case kindAck:
+		return t.receiveDeliveryAck(env)
 	default:
 		return fmt.Errorf("unknown payload kind: %s", env.Kind)
 	}
@@ -372,12 +388,23 @@ func (t *TransferService) sendEnvelope(peer *Peer, env *envelope, writer func(io
 		return err
 	}
 	defer conn.Close()
-	if err := writeEnvelope(conn, env); err != nil {
+	sealed, err := sealEnvelope(env, shared)
+	if err != nil {
+		return err
+	}
+	if err := writeEnvelope(conn, sealed); err != nil {
 		return err
 	}
 	if writer != nil {
 		if t.isStopping() {
 			return errServiceStopping
+		}
+		var ackKey string
+		var ackCh chan *envelope
+		if env.Kind == kindFile || env.Kind == kindFolder {
+			ackKey = deliveryAckKey(env.Kind, transferDisplayName(env.Kind, env.Name), peerLabelOrIP(peer))
+			ackCh = t.registerPendingAck(ackKey)
+			defer t.unregisterPendingAck(ackKey)
 		}
 		var stream cipher.Stream
 		if env.Encrypted {
@@ -389,6 +416,19 @@ func (t *TransferService) sendEnvelope(peer *Peer, env *envelope, writer func(io
 		}
 		if err := writer(conn, stream); err != nil {
 			return err
+		}
+		if env.Kind == kindFile || env.Kind == kindFolder {
+			if err := t.awaitInlineDeliveryAck(conn, shared, env); err != nil {
+				if ackCh != nil {
+					if ack := t.waitPendingAck(ackCh, 2*time.Second); ack != nil {
+						if strings.EqualFold(ack.AckStatus, "ok") {
+							return nil
+						}
+						return fmt.Errorf("Delivery failed: %s '%s' to %s", transferKindLabel(env.Kind), transferDisplayName(env.Kind, env.Name), peerLabelOrIP(peer))
+					}
+				}
+				return err
+			}
 		}
 	}
 	return nil
@@ -418,31 +458,28 @@ func (t *TransferService) signEnvelope(env *envelope, key []byte) string {
 		mac.Write([]byte(env.Nonce))
 		mac.Write([]byte(env.Encoding))
 	}
+	mac.Write([]byte(env.AckKind))
+	mac.Write([]byte(env.AckStatus))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-func (t *TransferService) verifyEnvelope(env *envelope) ([]byte, error) {
-	publicKey, ok := t.discovery.SharedPublicKey(env.From, env.FromIP)
-	if !ok || publicKey == "" {
-		return nil, fmt.Errorf("discarded %s from %s (%s): peer not discovered yet", env.Kind, env.From, env.FromIP)
-	}
-	key, err := t.sharedKey(publicKey)
-	if err != nil {
-		return nil, fmt.Errorf("discarded %s from %s (%s): %w", env.Kind, env.From, env.FromIP, err)
+func (t *TransferService) verifyEnvelope(env *envelope, key []byte) error {
+	if len(key) == 0 {
+		return errors.New("missing envelope key")
 	}
 	expected := t.signEnvelope(env, key)
 	expectedBytes, err := hex.DecodeString(expected)
 	if err != nil {
-		return nil, fmt.Errorf("unable to compute signature for %s: %w", env.From, err)
+		return fmt.Errorf("unable to compute signature for %s: %w", env.From, err)
 	}
 	providedBytes, err := hex.DecodeString(env.HMAC)
 	if err != nil {
-		return nil, fmt.Errorf("invalid signature data from %s: %w", env.From, err)
+		return fmt.Errorf("invalid signature data from %s: %w", env.From, err)
 	}
 	if !hmac.Equal(expectedBytes, providedBytes) {
-		return nil, fmt.Errorf("discarded %s from %s (%s): signature mismatch", env.Kind, env.From, env.FromIP)
+		return fmt.Errorf("discarded %s from %s (%s): signature mismatch", env.Kind, env.From, env.FromIP)
 	}
-	return key, nil
+	return nil
 }
 
 func (t *TransferService) receiveFile(conn net.Conn, env *envelope, key []byte) error {
@@ -507,10 +544,16 @@ func (t *TransferService) receiveFile(conn net.Conn, env *envelope, key []byte) 
 	}
 	receivedChecksum := hex.EncodeToString(hasher.Sum(nil))
 	if !strings.EqualFold(receivedChecksum, env.Checksum) {
+		if err := t.writeInlineDeliveryAck(conn, key, env, kindFile, env.Name, "error"); err != nil {
+			t.sendDeliveryAckOutOfBand(env, kindFile, env.Name, "error")
+		}
 		t.emit(events.Event{Type: events.Error, Title: "Checksum mismatch", Message: env.Name, From: env.From, Timestamp: time.Now(), Path: destPath})
 		return errors.New("checksum mismatch")
 	}
 	cleanup = false
+	if err := t.writeInlineDeliveryAck(conn, key, env, kindFile, env.Name, "ok"); err != nil {
+		t.sendDeliveryAckOutOfBand(env, kindFile, env.Name, "ok")
+	}
 	t.emit(events.Event{Type: events.FileReceived, Title: "File received", Message: env.Name, From: env.From, Path: destPath, Size: env.Size, Timestamp: time.Now()})
 	localUser, _ := t.identity()
 	return t.history.AppendTransfer(env.From, localUser, destPath, env.Size, kindFile)
@@ -559,6 +602,9 @@ func (t *TransferService) receiveFolder(conn net.Conn, env *envelope, key []byte
 	}
 	receivedChecksum := hex.EncodeToString(hasher.Sum(nil))
 	if !strings.EqualFold(receivedChecksum, env.Checksum) {
+		if err := t.writeInlineDeliveryAck(conn, key, env, kindFolder, strings.TrimSuffix(env.Name, ".zip"), "error"); err != nil {
+			t.sendDeliveryAckOutOfBand(env, kindFolder, strings.TrimSuffix(env.Name, ".zip"), "error")
+		}
 		t.emit(events.Event{Type: events.Error, Title: "Checksum mismatch", Message: destDirName, From: env.From, Timestamp: time.Now(), Path: tempPath})
 		return errors.New("checksum mismatch")
 	}
@@ -582,7 +628,13 @@ func (t *TransferService) receiveFolder(conn net.Conn, env *envelope, key []byte
 	}
 	if err := unzip(tempPath, destDir); err != nil {
 		_ = os.RemoveAll(destDir) // Clean up partially extracted folder on failure
+		if ackErr := t.writeInlineDeliveryAck(conn, key, env, kindFolder, destDirName, "error"); ackErr != nil {
+			t.sendDeliveryAckOutOfBand(env, kindFolder, destDirName, "error")
+		}
 		return err
+	}
+	if err := t.writeInlineDeliveryAck(conn, key, env, kindFolder, destDirName, "ok"); err != nil {
+		t.sendDeliveryAckOutOfBand(env, kindFolder, destDirName, "ok")
 	}
 	t.emit(events.Event{Type: events.FolderReceived, Title: "Folder received", Message: destDirName, From: env.From, Path: destDir, Size: env.Size, Timestamp: time.Now()})
 	localUser, _ := t.identity()
@@ -704,6 +756,22 @@ func (t *TransferService) readWithProgress(reader io.Reader, dec cipher.Stream, 
 			return err
 		}
 		received += int64(n)
+		if !strings.EqualFold(ctx.direction, "receive") {
+			t.emit(events.Event{Type: events.Progress, Progress: &events.ProgressState{
+				ID:        ctx.id,
+				Label:     ctx.label,
+				Path:      ctx.path,
+				Peer:      ctx.peer,
+				Direction: ctx.direction,
+				Kind:      ctx.kind,
+				Current:   received,
+				Total:     total,
+				StartedAt: started,
+				UpdatedAt: time.Now(),
+			}})
+		}
+	}
+	if !strings.EqualFold(ctx.direction, "receive") {
 		t.emit(events.Event{Type: events.Progress, Progress: &events.ProgressState{
 			ID:        ctx.id,
 			Label:     ctx.label,
@@ -711,33 +779,278 @@ func (t *TransferService) readWithProgress(reader io.Reader, dec cipher.Stream, 
 			Peer:      ctx.peer,
 			Direction: ctx.direction,
 			Kind:      ctx.kind,
-			Current:   received,
+			Current:   total,
 			Total:     total,
 			StartedAt: started,
 			UpdatedAt: time.Now(),
+			Done:      true,
 		}})
 	}
-	t.emit(events.Event{Type: events.Progress, Progress: &events.ProgressState{
-		ID:        ctx.id,
-		Label:     ctx.label,
-		Path:      ctx.path,
-		Peer:      ctx.peer,
-		Direction: ctx.direction,
-		Kind:      ctx.kind,
-		Current:   total,
-		Total:     total,
-		StartedAt: started,
-		UpdatedAt: time.Now(),
-		Done:      true,
-	}})
 	return nil
 }
 
 func (t *TransferService) emit(evt events.Event) {
+	if evt.Type == events.Progress {
+		select {
+		case t.events <- evt:
+		default:
+		}
+		return
+	}
 	select {
 	case t.events <- evt:
 	default:
+		timer := time.NewTimer(500 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case t.events <- evt:
+		case <-timer.C:
+			t.logger.Error("dropping event %s because the event channel is saturated", evt.Type)
+		}
 	}
+}
+
+func (t *TransferService) receiveDeliveryAck(env *envelope) error {
+	t.notifyPendingAck(env)
+	t.renderDeliveryAck(env)
+	return nil
+}
+
+func (t *TransferService) awaitInlineDeliveryAck(conn net.Conn, shared []byte, sent *envelope) error {
+	if conn == nil {
+		return errors.New("missing transfer connection")
+	}
+	if setter, ok := conn.(readDeadlineSetter); ok {
+		_ = setter.SetReadDeadline(time.Now().Add(ackTimeout))
+		defer setter.SetReadDeadline(time.Time{})
+	}
+	frame, err := readEnvelope(conn)
+	if err != nil {
+		return fmt.Errorf("delivery confirmation timeout for %s '%s': %w", transferKindLabel(sent.Kind), transferDisplayName(sent.Kind, sent.Name), err)
+	}
+	ack, err := openEnvelope(frame, shared)
+	if err != nil {
+		return fmt.Errorf("invalid delivery confirmation: %w", err)
+	}
+	if ack.Kind != kindAck {
+		return fmt.Errorf("unexpected response kind '%s' during transfer confirmation", ack.Kind)
+	}
+	if err := t.verifyEnvelopeWithKey(ack, shared); err != nil {
+		return fmt.Errorf("invalid delivery confirmation signature: %w", err)
+	}
+	if ack.AckKind != "" && !strings.EqualFold(ack.AckKind, sent.Kind) {
+		return fmt.Errorf("delivery confirmation kind mismatch: sent=%s confirmed=%s", sent.Kind, ack.AckKind)
+	}
+	t.renderDeliveryAck(ack)
+	if !strings.EqualFold(ack.AckStatus, "ok") {
+		return fmt.Errorf("Delivery failed: %s '%s' to %s", transferKindLabel(sent.Kind), transferDisplayName(sent.Kind, sent.Name), strings.TrimSpace(sent.To))
+	}
+	return nil
+}
+
+func (t *TransferService) writeInlineDeliveryAck(conn net.Conn, key []byte, source *envelope, kind, name, status string) error {
+	if conn == nil {
+		return errors.New("missing transfer connection")
+	}
+	localUser, localIP := t.identity()
+	ack := &envelope{
+		Kind:      kindAck,
+		From:      localUser,
+		FromIP:    localIP,
+		To:        source.From,
+		Name:      name,
+		Timestamp: time.Now().Unix(),
+		AckKind:   kind,
+		AckStatus: status,
+	}
+	ack.HMAC = t.signEnvelope(ack, key)
+	sealed, err := sealEnvelope(ack, key)
+	if err != nil {
+		return err
+	}
+	return writeEnvelope(conn, sealed)
+}
+
+func (t *TransferService) verifyEnvelopeWithKey(env *envelope, key []byte) error {
+	expected := t.signEnvelope(env, key)
+	expectedBytes, err := hex.DecodeString(expected)
+	if err != nil {
+		return fmt.Errorf("unable to compute signature: %w", err)
+	}
+	providedBytes, err := hex.DecodeString(env.HMAC)
+	if err != nil {
+		return fmt.Errorf("invalid signature data: %w", err)
+	}
+	if !hmac.Equal(expectedBytes, providedBytes) {
+		return errors.New("signature mismatch")
+	}
+	return nil
+}
+
+func (t *TransferService) renderDeliveryAck(env *envelope) {
+	kindLabel := transferKindLabel(env.AckKind)
+	name := strings.TrimSpace(env.Name)
+	if name == "" {
+		name = "payload"
+	}
+	peer := strings.TrimSpace(env.From)
+	if peer == "" {
+		peer = "peer"
+	}
+	if strings.EqualFold(env.AckStatus, "ok") {
+		t.emit(events.Event{
+			Type:      events.Status,
+			Title:     "Delivery confirmed",
+			Message:   fmt.Sprintf("Delivered: %s '%s' to %s", kindLabel, name, peer),
+			From:      env.From,
+			Timestamp: time.Now(),
+		})
+		return
+	}
+	t.emit(events.Event{
+		Type:      events.Error,
+		Title:     "Delivery failed",
+		Message:   fmt.Sprintf("Delivery failed: %s '%s' to %s", kindLabel, name, peer),
+		From:      env.From,
+		Timestamp: time.Now(),
+	})
+}
+
+func (t *TransferService) sendDeliveryAckOutOfBand(source *envelope, kind, name, status string) {
+	peer, err := t.resolvePeerForAck(source)
+	if err != nil {
+		t.logger.Error("delivery ack fallback resolve peer: %v", err)
+		return
+	}
+	localUser, localIP := t.identity()
+	ack := &envelope{
+		Kind:      kindAck,
+		From:      localUser,
+		FromIP:    localIP,
+		To:        source.From,
+		Name:      transferDisplayName(kind, name),
+		Timestamp: time.Now().Unix(),
+		AckKind:   kind,
+		AckStatus: status,
+	}
+	if err := t.sendEnvelope(peer, ack, nil); err != nil {
+		t.logger.Error("delivery ack fallback send failed: %v", err)
+	}
+}
+
+func (t *TransferService) resolvePeerForAck(source *envelope) (*Peer, error) {
+	ip := strings.TrimSpace(source.FromIP)
+	if ip == "" {
+		return nil, errors.New("missing sender ip for ack")
+	}
+	if t.discovery != nil {
+		if peer, err := t.discovery.Resolve(ip); err == nil {
+			return peer, nil
+		}
+	}
+	if t.discovery == nil {
+		return nil, errors.New("discovery service unavailable")
+	}
+	publicKey, ok := t.discovery.SharedPublicKey(source.From, ip)
+	if !ok || strings.TrimSpace(publicKey) == "" {
+		return nil, fmt.Errorf("peer key unavailable for %s (%s)", source.From, ip)
+	}
+	return &Peer{Username: source.From, IP: ip, Port: t.cfg.ListenPort, PublicKey: publicKey}, nil
+}
+
+func deliveryAckKey(kind, name, peer string) string {
+	return strings.ToLower(strings.TrimSpace(kind)) + "|" + strings.ToLower(strings.TrimSpace(name)) + "|" + strings.ToLower(strings.TrimSpace(peer))
+}
+
+func peerLabelOrIP(peer *Peer) string {
+	if peer == nil {
+		return "peer"
+	}
+	if strings.TrimSpace(peer.Username) != "" {
+		return strings.TrimSpace(peer.Username)
+	}
+	if strings.TrimSpace(peer.IP) != "" {
+		return strings.TrimSpace(peer.IP)
+	}
+	return "peer"
+}
+
+func (t *TransferService) registerPendingAck(key string) chan *envelope {
+	ch := make(chan *envelope, 1)
+	t.pendingAckMu.Lock()
+	t.pendingAcks[key] = ch
+	t.pendingAckMu.Unlock()
+	return ch
+}
+
+func (t *TransferService) unregisterPendingAck(key string) {
+	t.pendingAckMu.Lock()
+	if _, ok := t.pendingAcks[key]; ok {
+		delete(t.pendingAcks, key)
+	}
+	t.pendingAckMu.Unlock()
+}
+
+func (t *TransferService) notifyPendingAck(env *envelope) {
+	peer := strings.TrimSpace(env.From)
+	if peer == "" {
+		peer = strings.TrimSpace(env.FromIP)
+	}
+	key := deliveryAckKey(env.AckKind, transferDisplayName(env.AckKind, env.Name), peer)
+	t.pendingAckMu.Lock()
+	ch := t.pendingAcks[key]
+	t.pendingAckMu.Unlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- env:
+	default:
+	}
+}
+
+func (t *TransferService) waitPendingAck(ch chan *envelope, timeout time.Duration) *envelope {
+	if ch == nil {
+		return nil
+	}
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case ack, ok := <-ch:
+		if !ok {
+			return nil
+		}
+		return ack
+	case <-timer.C:
+		return nil
+	}
+}
+
+func transferKindLabel(kind string) string {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case kindFolder:
+		return "Folder"
+	case kindFile:
+		return "File"
+	case kindMessage:
+		return "Message"
+	default:
+		return "Transfer"
+	}
+}
+
+func transferDisplayName(kind, name string) string {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return "payload"
+	}
+	if strings.EqualFold(strings.TrimSpace(kind), kindFolder) {
+		return strings.TrimSuffix(trimmed, ".zip")
+	}
+	return trimmed
 }
 
 func (t *TransferService) emitTransferIssue(kind, name, peer, path string, err error) {
@@ -864,11 +1177,7 @@ func (t *TransferService) sharedKey(peerPublicKey string) ([]byte, error) {
 	return key, nil
 }
 
-func writeEnvelope(conn net.Conn, env *envelope) error {
-	data, err := json.Marshal(env)
-	if err != nil {
-		return err
-	}
+func writeEnvelope(conn net.Conn, data []byte) error {
 	header := make([]byte, 4)
 	binary.BigEndian.PutUint32(header, uint32(len(data)))
 	if _, err := conn.Write(header); err != nil {
@@ -880,7 +1189,7 @@ func writeEnvelope(conn net.Conn, env *envelope) error {
 	return nil
 }
 
-func readEnvelope(conn net.Conn) (*envelope, error) {
+func readEnvelope(conn net.Conn) ([]byte, error) {
 	header := make([]byte, 4)
 	if _, err := io.ReadFull(conn, header); err != nil {
 		return nil, err
@@ -890,11 +1199,150 @@ func readEnvelope(conn net.Conn) (*envelope, error) {
 	if _, err := io.ReadFull(conn, payload); err != nil {
 		return nil, err
 	}
+	return payload, nil
+}
+
+func (t *TransferService) readSecureEnvelope(conn net.Conn) (*envelope, []byte, error) {
+	frame, err := readEnvelope(conn)
+	if err != nil {
+		return nil, nil, err
+	}
+	remoteIPs := remoteIPCandidates(conn)
+	if len(remoteIPs) == 0 {
+		return nil, nil, errors.New("unable to resolve remote address")
+	}
+	if t.discovery == nil {
+		return nil, nil, errors.New("discovery service unavailable")
+	}
+	var publicKey string
+	for _, ip := range remoteIPs {
+		if key, ok := t.discovery.SharedPublicKey("", ip); ok && strings.TrimSpace(key) != "" {
+			publicKey = key
+			break
+		}
+	}
+	if strings.TrimSpace(publicKey) == "" {
+		return nil, nil, fmt.Errorf("peer key unavailable for %s", remoteIPs[0])
+	}
+	shared, err := t.sharedKey(publicKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	env, err := openEnvelope(frame, shared)
+	if err != nil {
+		return nil, nil, err
+	}
+	return env, shared, nil
+}
+
+func sealEnvelope(env *envelope, shared []byte) ([]byte, error) {
+	plain, err := json.Marshal(env)
+	if err != nil {
+		return nil, err
+	}
+	nonce, err := randomNonce()
+	if err != nil {
+		return nil, err
+	}
+	stream, err := newCipherStream(shared, nonce)
+	if err != nil {
+		return nil, err
+	}
+	cipherText := make([]byte, len(plain))
+	stream.XORKeyStream(cipherText, plain)
+	mac := hmac.New(sha256.New, shared)
+	mac.Write([]byte("bonjou-envelope-v1"))
+	mac.Write(nonce)
+	mac.Write(cipherText)
+	sealed := sealedEnvelope{
+		Nonce:    hex.EncodeToString(nonce),
+		Payload:  base64.StdEncoding.EncodeToString(cipherText),
+		HMAC:     hex.EncodeToString(mac.Sum(nil)),
+		Encoding: "base64",
+	}
+	return json.Marshal(sealed)
+}
+
+func openEnvelope(frame []byte, shared []byte) (*envelope, error) {
+	var sealed sealedEnvelope
+	if err := json.Unmarshal(frame, &sealed); err != nil {
+		return nil, err
+	}
+	if sealed.Encoding != "" && sealed.Encoding != "base64" {
+		return nil, fmt.Errorf("unsupported envelope encoding: %s", sealed.Encoding)
+	}
+	nonce, err := hex.DecodeString(sealed.Nonce)
+	if err != nil {
+		return nil, fmt.Errorf("decode envelope nonce: %w", err)
+	}
+	cipherText, err := base64.StdEncoding.DecodeString(sealed.Payload)
+	if err != nil {
+		return nil, fmt.Errorf("decode envelope payload: %w", err)
+	}
+	providedMAC, err := hex.DecodeString(sealed.HMAC)
+	if err != nil {
+		return nil, fmt.Errorf("decode envelope hmac: %w", err)
+	}
+	mac := hmac.New(sha256.New, shared)
+	mac.Write([]byte("bonjou-envelope-v1"))
+	mac.Write(nonce)
+	mac.Write(cipherText)
+	if !hmac.Equal(mac.Sum(nil), providedMAC) {
+		return nil, errors.New("invalid envelope signature")
+	}
+	stream, err := newCipherStream(shared, nonce)
+	if err != nil {
+		return nil, err
+	}
+	plain := make([]byte, len(cipherText))
+	stream.XORKeyStream(plain, cipherText)
 	var env envelope
-	if err := json.Unmarshal(payload, &env); err != nil {
+	if err := json.Unmarshal(plain, &env); err != nil {
 		return nil, err
 	}
 	return &env, nil
+}
+
+func remoteIPCandidates(conn net.Conn) []string {
+	if conn == nil || conn.RemoteAddr() == nil {
+		return nil
+	}
+	raw := strings.TrimSpace(conn.RemoteAddr().String())
+	host, _, err := net.SplitHostPort(raw)
+	if err == nil {
+		raw = strings.TrimSpace(host)
+	}
+	if strings.HasPrefix(raw, "[") && strings.HasSuffix(raw, "]") {
+		raw = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(raw, "["), "]"))
+	}
+	if strings.Contains(raw, "%") {
+		raw = strings.TrimSpace(strings.SplitN(raw, "%", 2)[0])
+	}
+	if raw == "" {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	add := func(value string, out *[]string) {
+		v := strings.TrimSpace(value)
+		if v == "" {
+			return
+		}
+		if _, exists := seen[v]; exists {
+			return
+		}
+		seen[v] = struct{}{}
+		*out = append(*out, v)
+	}
+	var out []string
+	add(raw, &out)
+	if ip := net.ParseIP(raw); ip != nil {
+		add(ip.String(), &out)
+		if v4 := ip.To4(); v4 != nil {
+			add(v4.String(), &out)
+			add("::ffff:"+v4.String(), &out)
+		}
+	}
+	return out
 }
 
 func formatPeer(peer *Peer) string {
