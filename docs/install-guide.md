@@ -18,8 +18,9 @@ iwr https://raw.githubusercontent.com/hamzaabdulwahab/bonjou-cli/main/scripts/in
 
 What this does:
 - Uses Homebrew on macOS if available
-- Uses Scoop on Windows if available
-- Falls back to direct binary install when package managers are unavailable
+- Uses WinGet on Windows if available (pre-installed on Windows 10/11)
+- Falls back to Scoop on Windows if WinGet is not available
+- Falls back to direct binary install when no package manager is found
 
 ## Mac
 
@@ -129,9 +130,35 @@ sudo mv bonjou /usr/local/bin/
 
 ## Windows
 
-### Option 1: Scoop (easiest)
+### Option 1: WinGet (pre-installed on Windows 10/11)
 
-Open PowerShell:
+WinGet ships with every modern Windows installation. Open PowerShell or Command Prompt:
+
+```powershell
+winget install HamzaAbdulWahab.Bonjou
+```
+
+Run:
+```powershell
+bonjou
+```
+
+Update later:
+```powershell
+winget upgrade HamzaAbdulWahab.Bonjou
+```
+
+Uninstall:
+```powershell
+winget uninstall HamzaAbdulWahab.Bonjou
+```
+
+> **Note:** The package must be published in the [winget-pkgs community repository](https://github.com/microsoft/winget-pkgs) for this to work.
+> The submission manifest lives at `packaging/winget/HamzaAbdulWahab.Bonjou.yaml` in this repo.
+
+### Option 2: Scoop
+
+If you have [Scoop](https://scoop.sh) installed, open PowerShell:
 ```powershell
 scoop install https://raw.githubusercontent.com/hamzaabdulwahab/scoop-bonjou/main/bonjou.json
 ```
@@ -158,7 +185,7 @@ scoop cache rm bonjou
 scoop install bonjou
 ```
 
-### Option 2: Download manually
+### Option 3: Download manually
 
 1. Download from releases:
 ```powershell
@@ -179,7 +206,7 @@ Expand-Archive bonjou-windows.zip -DestinationPath C:\Tools\Bonjou
 bonjou
 ```
 
-### Option 3: Build from source
+### Option 4: Build from source
 
 ```powershell
 git clone https://github.com/hamzaabdulwahab/bonjou-cli.git

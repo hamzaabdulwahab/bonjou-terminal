@@ -2,6 +2,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $Repo = 'hamzaabdulwahab/bonjou-cli'
+$WinGetId = 'HamzaAbdulWahab.Bonjou'
 $ScoopManifestUrl = 'https://raw.githubusercontent.com/hamzaabdulwahab/scoop-bonjou/main/bonjou.json'
 
 function Write-Info {
@@ -47,6 +48,16 @@ function Install-Direct {
     Add-ToUserPathIfMissing -Dir $installDir
     Write-Info "Installed to $target"
     Write-Info 'Path updated for current user. Restart terminal to use bonjou.'
+}
+
+if (Get-Command winget -ErrorAction SilentlyContinue) {
+    Write-Info 'WinGet found. Installing via WinGet...'
+    winget install $WinGetId --silent --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -eq 0) {
+        Write-Info 'Installed successfully via WinGet.'
+        exit 0
+    }
+    Write-Info 'WinGet could not find the package (may not be published yet). Trying Scoop...'
 }
 
 if (Get-Command scoop -ErrorAction SilentlyContinue) {

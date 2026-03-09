@@ -38,6 +38,11 @@ brew tap hamzaabdulwahab/bonjou https://github.com/hamzaabdulwahab/homebrew-bonj
 brew install bonjou
 ```
 
+**Windows (WinGet — pre-installed on Windows 10/11):**
+```powershell
+winget install HamzaAbdulWahab.Bonjou
+```
+
 **Windows (Scoop):**
 ```powershell
 scoop install https://raw.githubusercontent.com/hamzaabdulwahab/scoop-bonjou/main/bonjou.json
