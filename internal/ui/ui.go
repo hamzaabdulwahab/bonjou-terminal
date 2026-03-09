@@ -49,6 +49,18 @@ var welcomeBanner = []string{
 	`|____/ \___/|_| \_|  \___/ \___/ \___/ `,
 }
 
+// welcomeBannerV2 renders BONJOU in the larry3d figlet font.
+// The original welcomeBanner is preserved above for comparison.
+var welcomeBannerV2 = []string{
+	" ____     _____   __  __   _____  _____   __  __     ",
+	"/\\  _`\\  /\\  __`\\/\\ \\/\\ \\ /\\___ \\/\\  __`\\/\\ \\/\\ \\    ",
+	"\\ \\ \\L\\ \\\\ \\ \\/\\ \\ \\ `\\\\ \\\\/__/\\ \\ \\ \\/\\ \\ \\ \\ \\ \\   ",
+	" \\ \\  _ <'\\ \\ \\ \\ \\ \\ , ` \\  _\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\  ",
+	"  \\ \\ \\L\\ \\\\ \\ \\_\\ \\ \\ \\`\\ \\/\\ \\_\\ \\ \\ \\_\\ \\ \\ \\_\\ \\ ",
+	"   \\ \\____/ \\ \\_____\\ \\_\\ \\_\\ \\____/\\ \\_____\\ \\_____\\",
+	"    \\/___/   \\/_____/\\/_/\\/_/\\/___/  \\/_____/\\/_____/",
+}
+
 type UI struct {
 	session *session.Session
 	handler *commands.Handler
@@ -208,11 +220,14 @@ func (u *UI) renderEvent(evt events.Event) {
 }
 
 func (u *UI) printWelcome() {
-	for _, line := range welcomeBanner {
-		u.writeLine(colorPrimary + centerLine(line, bannerWidth) + colorReset)
+	sep := "◆─────────────────────────◆─────────────────────────◆"
+	u.writeLine(colorAccent + displayCenter(sep, bannerWidth) + colorReset)
+	for _, line := range welcomeBannerV2 {
+		u.writeLine(gradientLine(centerLine(line, bannerWidth)))
 	}
-	tagline := "Terminal LAN chat & transfers like a boss."
-	u.writeLine(colorSuccess + centerLine(tagline, bannerWidth) + colorReset)
+	u.writeLine(colorAccent + displayCenter(sep, bannerWidth) + colorReset)
+	tagline := "Terminal LAN chat & transfers  |  encrypted  |  fast"
+	u.writeLine(colorMuted + centerLine(tagline, bannerWidth) + colorReset)
 	u.writeLine("")
 	u.writeLine(fmt.Sprintf("%s🌐 Welcome to Bonjou v%s%s", colorPrimary, version.Version, colorReset))
 	u.writeLine(fmt.Sprintf("%s👤 User:%s %s | IP: %s", colorMuted, colorReset, u.session.Config.Username, u.session.LocalIP()))
@@ -362,6 +377,18 @@ func centerLine(line string, width int) string {
 		pad = 0
 	}
 	return strings.Repeat(" ", pad) + trimmed
+}
+
+// displayCenter centers s within width using terminal display-cell width
+// (via runewidth) rather than byte length, so multi-byte Unicode characters
+// (e.g. box-drawing glyphs) are aligned correctly.
+func displayCenter(s string, width int) string {
+	sw := runewidth.StringWidth(s)
+	if sw >= width {
+		return s
+	}
+	pad := (width - sw) / 2
+	return strings.Repeat(" ", pad) + s
 }
 
 func (u *UI) formatProgressLine(ps *events.ProgressState, percent float64, done bool, now time.Time) string {
@@ -534,6 +561,27 @@ func gradientColor(ratio float64) string {
 	g := int(float64(gradientStartRGB[1]) + ratio*float64(gradientEndRGB[1]-gradientStartRGB[1]))
 	b := int(float64(gradientStartRGB[2]) + ratio*float64(gradientEndRGB[2]-gradientStartRGB[2]))
 	return fmt.Sprintf("\033[38;2;%d;%d;%dm", r, g, b)
+}
+
+// gradientLine applies a left-to-right purple→blue gradient to every
+// character in s using the same palette as the progress bar.
+func gradientLine(s string) string {
+	runes := []rune(s)
+	n := len(runes)
+	if n == 0 {
+		return s
+	}
+	var sb strings.Builder
+	for i, r := range runes {
+		ratio := 0.0
+		if n > 1 {
+			ratio = float64(i) / float64(n-1)
+		}
+		sb.WriteString(gradientColor(ratio))
+		sb.WriteRune(r)
+	}
+	sb.WriteString(colorReset)
+	return sb.String()
 }
 
 func humanBytes(n int64) string {
