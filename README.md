@@ -88,26 +88,33 @@ Type @help for commands.
 @send alex Hello!               # send message to alex
 @file alex ~/report.pdf         # send a file
 @folder alex ./my-folder        # send a folder
+@wizard                         # guided send flow (peer + action + confirm)
 @broadcast Meeting in 5 mins    # message everyone
 @help                           # see all commands
 @exit                           # quit
 ```
 
+You can also run `@send`, `@file`, `@folder`, `@setname`, or `@setpath` without full arguments to open guided prompts.
+
+To exit wizard mode at any step, press `Ctrl+C`. You will return to the main command prompt and nothing is sent unless you confirm.
+
 ## Transfer Status Semantics
 
-When you send a file or folder, Bonjou shows two stages:
+When you send a file or folder, Bonjou now uses clear end-state messaging:
 
-- `Folder sent: 'Books' to abd (waiting for delivery confirmation)`
-	- Your device finished uploading bytes to the peer.
-	- This does not yet mean the peer has extracted/saved the folder.
+- Progress line while uploading bytes
+	- Example: `✓ Sent 🗂️ Folder → abd@192.168.1.3:46321 ... 100%`
+	- This shows sender-side upload completion.
 
-- `Delivered: Folder 'Books' to abd`
-	- The receiver finished processing the transfer and sent an app-level ACK.
-	- This is the success confirmation you should rely on.
+- Final success confirmation
+	- Example: `Delivered: Folder 'Books' to abd`
+	- This is the receiver-confirmed result (app-level ACK).
 
-If something fails on the receiver side, you should see:
+- Final failure confirmation
+	- Example: `Failed to send Folder 'Books' to abd: receiver did not confirm the transfer in time ...`
+	- Errors are translated to user-friendly language.
 
-- `Delivery failed: Folder 'Books' to abd`
+You should rely on `Delivered: ...` as the definitive success signal.
 
 Repeated sends are allowed. If the same name already exists, Bonjou saves into a unique destination (for example `Books`, then `Books_1`, `Books_2`, ...).
 

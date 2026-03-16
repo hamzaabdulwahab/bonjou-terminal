@@ -38,21 +38,22 @@ const (
 var errServiceStopping = errors.New("transfer service stopping")
 
 type envelope struct {
-	Kind      string `json:"kind"`
-	From      string `json:"from"`
-	FromIP    string `json:"from_ip"`
-	To        string `json:"to"`
-	Name      string `json:"name"`
-	Size      int64  `json:"size"`
-	Timestamp int64  `json:"ts"`
-	Message   string `json:"message"`
-	Checksum  string `json:"checksum"`
-	HMAC      string `json:"hmac"`
-	Encrypted bool   `json:"encrypted,omitempty"`
-	Nonce     string `json:"nonce,omitempty"`
-	Encoding  string `json:"encoding,omitempty"`
-	AckKind   string `json:"ack_kind,omitempty"`
-	AckStatus string `json:"ack_status,omitempty"`
+	Kind       string `json:"kind"`
+	TransferID string `json:"transfer_id,omitempty"`
+	From       string `json:"from"`
+	FromIP     string `json:"from_ip"`
+	To         string `json:"to"`
+	Name       string `json:"name"`
+	Size       int64  `json:"size"`
+	Timestamp  int64  `json:"ts"`
+	Message    string `json:"message"`
+	Checksum   string `json:"checksum"`
+	HMAC       string `json:"hmac"`
+	Encrypted  bool   `json:"encrypted,omitempty"`
+	Nonce      string `json:"nonce,omitempty"`
+	Encoding   string `json:"encoding,omitempty"`
+	AckKind    string `json:"ack_kind,omitempty"`
+	AckStatus  string `json:"ack_status,omitempty"`
 }
 
 type sealedEnvelope struct {
@@ -248,11 +249,17 @@ func (t *TransferService) SendMessage(peer *Peer, message string) error {
 }
 
 // SendFile streams a file to the peer.
-func (t *TransferService) SendFile(peer *Peer, path string) error {
+func (t *TransferService) SendFile(peer *Peer, path string) (err error) {
 	if t.isStopping() {
 		return errServiceStopping
 	}
 	localUser, localIP := t.identity()
+	name := filepath.Base(path)
+	defer func() {
+		if err != nil {
+			t.emitTransferIssue(kindFile, name, peer.Username, path, err)
+		}
+	}()
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -274,14 +281,15 @@ func (t *TransferService) SendFile(peer *Peer, path string) error {
 	}
 	defer tf.file.Close()
 	env := &envelope{
-		Kind:      kindFile,
-		From:      localUser,
-		FromIP:    localIP,
-		To:        peer.Username,
-		Name:      filepath.Base(path),
-		Size:      tf.size,
-		Timestamp: time.Now().Unix(),
-		Checksum:  tf.checksum,
+		Kind:       kindFile,
+		TransferID: newTransferID(),
+		From:       localUser,
+		FromIP:     localIP,
+		To:         peer.Username,
+		Name:       name,
+		Size:       tf.size,
+		Timestamp:  time.Now().Unix(),
+		Checksum:   tf.checksum,
 	}
 	stream := func(writer io.Writer, enc cipher.Stream) error {
 		ctx := progressContext{
@@ -294,20 +302,24 @@ func (t *TransferService) SendFile(peer *Peer, path string) error {
 		}
 		return t.copyWithProgress(writer, enc, tf.file, tf.size, ctx)
 	}
-	if err := t.sendEnvelope(peer, env, stream); err != nil {
-		t.emitTransferIssue(kindFile, env.Name, peer.Username, path, err)
+	if err = t.sendEnvelope(peer, env, stream); err != nil {
 		return err
 	}
-	t.emit(events.Event{Type: events.FileSent, Title: "File sent", Message: env.Name, To: peer.Username, Path: path, Size: env.Size, Timestamp: time.Now()})
 	return t.history.AppendTransfer(localUser, peer.Username, path, env.Size, kindFile)
 }
 
 // SendFolder compresses and shares a folder with the peer.
-func (t *TransferService) SendFolder(peer *Peer, dir string) error {
+func (t *TransferService) SendFolder(peer *Peer, dir string) (err error) {
 	if t.isStopping() {
 		return errServiceStopping
 	}
 	localUser, localIP := t.identity()
+	displayName := filepath.Base(dir)
+	defer func() {
+		if err != nil {
+			t.emitTransferIssue(kindFolder, displayName, peer.Username, dir, err)
+		}
+	}()
 	info, err := os.Stat(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -320,7 +332,7 @@ func (t *TransferService) SendFolder(peer *Peer, dir string) error {
 	}
 	archivePath, err := zipDirectory(dir)
 	if err != nil {
-		return fmt.Errorf("failed to compress folder for transfer: %v", err)
+		return err
 	}
 	defer os.Remove(archivePath)
 	// Open the archive once to atomically derive its size, checksum, and
@@ -330,16 +342,16 @@ func (t *TransferService) SendFolder(peer *Peer, dir string) error {
 		return fmt.Errorf("cannot read compressed archive for transfer: %v", err)
 	}
 	defer tf.file.Close()
-	displayName := filepath.Base(dir)
 	env := &envelope{
-		Kind:      kindFolder,
-		From:      localUser,
-		FromIP:    localIP,
-		To:        peer.Username,
-		Name:      displayName + ".zip",
-		Size:      tf.size,
-		Timestamp: time.Now().Unix(),
-		Checksum:  tf.checksum,
+		Kind:       kindFolder,
+		TransferID: newTransferID(),
+		From:       localUser,
+		FromIP:     localIP,
+		To:         peer.Username,
+		Name:       displayName + ".zip",
+		Size:       tf.size,
+		Timestamp:  time.Now().Unix(),
+		Checksum:   tf.checksum,
 	}
 	stream := func(writer io.Writer, enc cipher.Stream) error {
 		ctx := progressContext{
@@ -352,11 +364,9 @@ func (t *TransferService) SendFolder(peer *Peer, dir string) error {
 		}
 		return t.copyWithProgress(writer, enc, tf.file, tf.size, ctx)
 	}
-	if err := t.sendEnvelope(peer, env, stream); err != nil {
-		t.emitTransferIssue(kindFolder, displayName, peer.Username, dir, err)
+	if err = t.sendEnvelope(peer, env, stream); err != nil {
 		return err
 	}
-	t.emit(events.Event{Type: events.FolderSent, Title: "Folder sent", Message: displayName, To: peer.Username, Path: dir, Size: env.Size, Timestamp: time.Now()})
 	return t.history.AppendTransfer(localUser, peer.Username, dir, env.Size, kindFolder)
 }
 
@@ -413,7 +423,7 @@ func (t *TransferService) sendEnvelope(peer *Peer, env *envelope, writer func(io
 		var ackKey string
 		var ackCh chan *envelope
 		if env.Kind == kindFile || env.Kind == kindFolder {
-			ackKey = deliveryAckKey(env.Kind, transferDisplayName(env.Kind, env.Name), peerLabelOrIP(peer))
+			ackKey = deliveryAckKey(env.TransferID, env.Kind, transferDisplayName(env.Kind, env.Name), peerLabelOrIP(peer))
 			ackCh = t.registerPendingAck(ackKey)
 			defer t.unregisterPendingAck(ackKey)
 		}
@@ -448,6 +458,7 @@ func (t *TransferService) sendEnvelope(peer *Peer, env *envelope, writer func(io
 func (t *TransferService) signEnvelope(env *envelope, key []byte) string {
 	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(env.Kind))
+	mac.Write([]byte(env.TransferID))
 	mac.Write([]byte(env.From))
 	mac.Write([]byte(env.FromIP))
 	mac.Write([]byte(env.To))
@@ -872,14 +883,15 @@ func (t *TransferService) writeInlineDeliveryAck(conn net.Conn, key []byte, sour
 	}
 	localUser, localIP := t.identity()
 	ack := &envelope{
-		Kind:      kindAck,
-		From:      localUser,
-		FromIP:    localIP,
-		To:        source.From,
-		Name:      name,
-		Timestamp: time.Now().Unix(),
-		AckKind:   kind,
-		AckStatus: status,
+		Kind:       kindAck,
+		TransferID: source.TransferID,
+		From:       localUser,
+		FromIP:     localIP,
+		To:         source.From,
+		Name:       name,
+		Timestamp:  time.Now().Unix(),
+		AckKind:    kind,
+		AckStatus:  status,
 	}
 	ack.HMAC = t.signEnvelope(ack, key)
 	sealed, err := sealEnvelope(ack, key)
@@ -942,14 +954,15 @@ func (t *TransferService) sendDeliveryAckOutOfBand(source *envelope, kind, name,
 	}
 	localUser, localIP := t.identity()
 	ack := &envelope{
-		Kind:      kindAck,
-		From:      localUser,
-		FromIP:    localIP,
-		To:        source.From,
-		Name:      transferDisplayName(kind, name),
-		Timestamp: time.Now().Unix(),
-		AckKind:   kind,
-		AckStatus: status,
+		Kind:       kindAck,
+		TransferID: source.TransferID,
+		From:       localUser,
+		FromIP:     localIP,
+		To:         source.From,
+		Name:       transferDisplayName(kind, name),
+		Timestamp:  time.Now().Unix(),
+		AckKind:    kind,
+		AckStatus:  status,
 	}
 	if err := t.sendEnvelope(peer, ack, nil); err != nil {
 		t.logger.Error("delivery ack fallback send failed: %v", err)
@@ -976,7 +989,10 @@ func (t *TransferService) resolvePeerForAck(source *envelope) (*Peer, error) {
 	return &Peer{Username: source.From, IP: ip, Port: t.cfg.ListenPort, PublicKey: publicKey}, nil
 }
 
-func deliveryAckKey(kind, name, peer string) string {
+func deliveryAckKey(transferID, kind, name, peer string) string {
+	if trimmedID := strings.ToLower(strings.TrimSpace(transferID)); trimmedID != "" {
+		return trimmedID
+	}
 	return strings.ToLower(strings.TrimSpace(kind)) + "|" + strings.ToLower(strings.TrimSpace(name)) + "|" + strings.ToLower(strings.TrimSpace(peer))
 }
 
@@ -1014,7 +1030,7 @@ func (t *TransferService) notifyPendingAck(env *envelope) {
 	if peer == "" {
 		peer = strings.TrimSpace(env.FromIP)
 	}
-	key := deliveryAckKey(env.AckKind, transferDisplayName(env.AckKind, env.Name), peer)
+	key := deliveryAckKey(env.TransferID, env.AckKind, transferDisplayName(env.AckKind, env.Name), peer)
 	t.pendingAckMu.Lock()
 	ch := t.pendingAcks[key]
 	t.pendingAckMu.Unlock()
@@ -1083,6 +1099,10 @@ func humanizeTransferError(err error) string {
 		return "peer is not reachable (connection refused) — check they are running Bonjou on the same network"
 	case strings.Contains(msg, "no route to host"):
 		return "peer is not reachable — check your network connection"
+	case strings.Contains(msg, "no delivery confirmation"):
+		return "receiver did not confirm the transfer in time — ask them if they received the approval request, then try again"
+	case strings.Contains(msg, "unexpected EOF") || strings.EqualFold(strings.TrimSpace(msg), "EOF"):
+		return "connection closed before transfer confirmation — please try again"
 	case strings.Contains(msg, "broken pipe") || strings.Contains(msg, "use of closed network connection"):
 		return "connection was lost mid-transfer — please try again"
 	case strings.Contains(msg, "reset by peer"):
@@ -1091,6 +1111,10 @@ func humanizeTransferError(err error) string {
 		return "file no longer exists at the specified path"
 	case strings.Contains(msg, "permission denied"):
 		return "permission denied — check file and folder permissions"
+	case strings.Contains(msg, "contains a symbolic link"):
+		return msg
+	case strings.Contains(msg, "contains an unsupported special file"):
+		return msg
 	case strings.Contains(msg, "no delivery confirmation"),
 		strings.Contains(msg, "integrity check failed"),
 		strings.Contains(msg, "Delivery failed"):
@@ -1142,6 +1166,14 @@ func randomNonce() ([]byte, error) {
 		return nil, err
 	}
 	return nonce, nil
+}
+
+func newTransferID() string {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("tx-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(buf)
 }
 
 func deriveCipherKey(shared []byte) []byte {
@@ -1490,6 +1522,13 @@ func zipDirectory(dir string) (string, error) {
 		if err != nil {
 			return err
 		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			targetInfo, statErr := os.Stat(path)
+			if statErr == nil && targetInfo.IsDir() {
+				return fmt.Errorf("folder contains a symbolic link to a directory that Bonjou cannot package safely: %s", path)
+			}
+			return fmt.Errorf("folder contains a symbolic link that Bonjou cannot package safely: %s", path)
+		}
 		rel, err := filepath.Rel(dir, path)
 		if err != nil {
 			return err
@@ -1510,6 +1549,9 @@ func zipDirectory(dir string) (string, error) {
 		writer, err := archive.CreateHeader(header)
 		if err != nil {
 			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("folder contains an unsupported special file: %s", path)
 		}
 		file, err := os.Open(path)
 		if err != nil {

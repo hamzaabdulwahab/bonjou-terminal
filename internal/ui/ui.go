@@ -193,7 +193,7 @@ func (u *UI) renderEvent(evt events.Event) {
 		if evt.Type == events.FolderSent {
 			itemKind = "Folder"
 		}
-		u.writeLine(fmt.Sprintf("%s[%s] %s sent: '%s' to %s (waiting for delivery confirmation)%s", colorMuted, ts, itemKind, safe(evt.Message), safe(evt.To), colorReset))
+		u.writeLine(fmt.Sprintf("%s[%s] %s upload completed: '%s' to %s%s", colorMuted, ts, itemKind, safe(evt.Message), safe(evt.To), colorReset))
 	case events.Error:
 		msg := safe(evt.Message)
 		// Avoid a redundant "ERROR: Delivery failed:" double-label by not

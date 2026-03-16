@@ -2,6 +2,8 @@
 
 All commands start with `@`. Type them in the Bonjou terminal.
 
+If you run `@send`, `@file`, `@folder`, `@setname`, or `@setpath` with missing values, Bonjou now opens guided prompts.
+
 ## Basic Commands
 
 | Command | What it does |
@@ -10,6 +12,7 @@ All commands start with `@`. Type them in the Bonjou terminal.
 | `@whoami` | Show your username and IP |
 | `@users` | List people on the network |
 | `@status` | Show app info and paths |
+| `@wizard` | Guided send flow (peer + message/file/folder) |
 | `@history` | Show past messages |
 | `@clear` | Clear the screen |
 | `@exit` | Quit Bonjou |
@@ -19,6 +22,11 @@ All commands start with `@`. Type them in the Bonjou terminal.
 **To one person:**
 ```
 @send alex Hey, how are you?
+```
+
+**Guided fallback (if you omit target/message):**
+```
+@send
 ```
 
 **To multiple people:**
@@ -33,6 +41,13 @@ All commands start with `@`. Type them in the Bonjou terminal.
 
 You can use their username or IP address.
 
+**Guided interactive mode:**
+```
+@wizard
+```
+
+To exit wizard mode at any step, press `Ctrl+C`. You return to the normal command prompt and nothing is sent unless you confirm.
+
 ## Sending Files
 
 **Send a file:**
@@ -40,9 +55,19 @@ You can use their username or IP address.
 @file alex ~/Documents/report.pdf
 ```
 
+**Guided fallback:**
+```
+@file
+```
+
 **Send a folder:**
 ```
 @folder alex ./my-project
+```
+
+**Guided fallback:**
+```
+@folder
 ```
 
 **Send to multiple people:**
@@ -53,6 +78,19 @@ You can use their username or IP address.
 Files are received in:
 - `~/.bonjou/received/files/`
 - `~/.bonjou/received/folders/`
+
+## Transfer Status
+
+Bonjou uses clear end-state transfer messages:
+
+- Upload progress line while bytes are being sent
+	- Example: `✓ Sent 🗂️ Folder → abd@192.168.1.3:46321 ... 100%`
+- Final success confirmation
+	- Example: `Delivered: Folder 'Books' to abd`
+- Final failure confirmation
+	- Example: `Failed to send Folder 'Books' to abd: receiver did not confirm the transfer in time ...`
+
+Treat `Delivered: ...` as the definitive success signal.
 
 ## Discovery Limits
 
@@ -67,10 +105,14 @@ Bonjou discovery is same-subnet only (UDP broadcast generally does not cross rou
 @setname john
 ```
 
+or run `@setname` to open a guided input.
+
 **Change where files are saved:**
 ```
 @setpath ~/Downloads/bonjou
 ```
+
+or run `@setpath` to choose the directory interactively.
 
 ## Tips
 
@@ -79,3 +121,4 @@ Bonjou discovery is same-subnet only (UDP broadcast generally does not cross rou
 - Use quotes for paths with spaces: `@file alex "~/My Documents/file.pdf"`
 - Use `~` for home directory
 - Run `bonjou --version` to check version
+- Use `@wizard` for a guided send flow if you prefer prompts over typing full commands
