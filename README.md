@@ -88,10 +88,13 @@ Type @help for commands.
 @send alex Hello!               # send message to alex
 @file alex ~/report.pdf         # send a file
 @folder alex ./my-folder        # send a folder
+@wizard                         # guided send flow (peer + action + confirm)
 @broadcast Meeting in 5 mins    # message everyone
 @help                           # see all commands
 @exit                           # quit
 ```
+
+You can also run `@send`, `@file`, `@folder`, `@setname`, or `@setpath` without full arguments to open guided prompts.
 
 ## Transfer Status Semantics
 

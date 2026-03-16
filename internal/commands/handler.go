@@ -6,11 +6,13 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 
+	"github.com/charmbracelet/huh"
 	"github.com/hamzawahab/bonjou-cli/internal/history"
 	"github.com/hamzawahab/bonjou-cli/internal/network"
 	"github.com/hamzawahab/bonjou-cli/internal/session"
@@ -63,6 +65,8 @@ func (h *Handler) Handle(input string) (Result, error) {
 		return h.cmdMulti(parts, args)
 	case "broadcast":
 		return h.cmdBroadcast(args)
+	case "wizard":
+		return h.cmdWizard()
 	case "history":
 		return h.cmdHistory()
 	case "setpath":
@@ -103,17 +107,34 @@ func (h *Handler) cmdUsers() (Result, error) {
 }
 
 func (h *Handler) cmdSend(parts []string, args string) (Result, error) {
-	if len(parts) < 2 {
-		return Result{Output: "Usage: @send <user/ip> <message>"}, nil
+	target := ""
+	if len(parts) >= 2 {
+		target = parts[1]
 	}
-	target := parts[1]
-	message := strings.TrimSpace(strings.TrimPrefix(args, target))
-	if message == "" {
-		return Result{Output: "Message cannot be empty."}, nil
+	message := ""
+	if target != "" {
+		message = strings.TrimSpace(strings.TrimPrefix(args, target))
 	}
-	peer, err := h.resolvePeer(target)
+	peer, err := h.resolveOrPromptPeer(target, "Choose recipient")
 	if err != nil {
+		if len(parts) < 2 {
+			return Result{Output: "Usage: @send <user/ip> <message>"}, nil
+		}
 		return Result{}, err
+	}
+	if message == "" {
+		message, err = promptTextInput("Message", "Type your message", "", func(value string) error {
+			if strings.TrimSpace(value) == "" {
+				return errors.New("message cannot be empty")
+			}
+			return nil
+		})
+		if err != nil {
+			if len(parts) < 2 {
+				return Result{Output: "Usage: @send <user/ip> <message>"}, nil
+			}
+			return Result{Output: "Send cancelled."}, nil
+		}
 	}
 	if err := h.session.Transfer.SendMessage(peer, message); err != nil {
 		return Result{}, err
@@ -122,24 +143,26 @@ func (h *Handler) cmdSend(parts []string, args string) (Result, error) {
 }
 
 func (h *Handler) cmdFile(parts []string, args string) (Result, error) {
-	if len(parts) < 3 {
-		return Result{Output: "Usage: @file <user/ip> <path>"}, nil
+	target := ""
+	if len(parts) >= 2 {
+		target = parts[1]
 	}
-	target := parts[1]
-	rawPath := strings.TrimSpace(strings.TrimPrefix(args, target))
-	path, err := normalizePathArg(rawPath)
+	peer, err := h.resolveOrPromptPeer(target, "Choose file recipient")
 	if err != nil {
+		if len(parts) < 3 {
+			return Result{Output: "Usage: @file <user/ip> <path>"}, nil
+		}
 		return Result{}, err
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return Result{}, err
+	rawPath := ""
+	if target != "" {
+		rawPath = strings.TrimSpace(strings.TrimPrefix(args, target))
 	}
-	if info.IsDir() {
-		return Result{Output: "Path is a directory. Use @folder instead."}, nil
-	}
-	peer, err := h.resolvePeer(target)
+	path, err := h.resolveOrPromptPath(rawPath, "file")
 	if err != nil {
+		if len(parts) < 3 {
+			return Result{Output: "Usage: @file <user/ip> <path>"}, nil
+		}
 		return Result{}, err
 	}
 	if err := h.session.Transfer.SendFile(peer, path); err != nil {
@@ -149,24 +172,26 @@ func (h *Handler) cmdFile(parts []string, args string) (Result, error) {
 }
 
 func (h *Handler) cmdFolder(parts []string, args string) (Result, error) {
-	if len(parts) < 3 {
-		return Result{Output: "Usage: @folder <user/ip> <dir>"}, nil
+	target := ""
+	if len(parts) >= 2 {
+		target = parts[1]
 	}
-	target := parts[1]
-	rawPath := strings.TrimSpace(strings.TrimPrefix(args, target))
-	path, err := normalizePathArg(rawPath)
+	peer, err := h.resolveOrPromptPeer(target, "Choose folder recipient")
 	if err != nil {
+		if len(parts) < 3 {
+			return Result{Output: "Usage: @folder <user/ip> <dir>"}, nil
+		}
 		return Result{}, err
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return Result{}, err
+	rawPath := ""
+	if target != "" {
+		rawPath = strings.TrimSpace(strings.TrimPrefix(args, target))
 	}
-	if !info.IsDir() {
-		return Result{Output: "Path is not a directory."}, nil
-	}
-	peer, err := h.resolvePeer(target)
+	path, err := h.resolveOrPromptPath(rawPath, "folder")
 	if err != nil {
+		if len(parts) < 3 {
+			return Result{Output: "Usage: @folder <user/ip> <dir>"}, nil
+		}
 		return Result{}, err
 	}
 	if err := h.session.Transfer.SendFolder(peer, path); err != nil {
@@ -393,6 +418,160 @@ func (h *Handler) cmdBroadcast(message string) (Result, error) {
 	return Result{Output: fmt.Sprintf("Broadcast to %d peers", len(peers))}, nil
 }
 
+func (h *Handler) cmdWizard() (Result, error) {
+	if h.session == nil || h.session.Discovery == nil || h.session.Transfer == nil {
+		return Result{}, errors.New("wizard is unavailable: session services are not ready")
+	}
+
+	peers := h.session.Discovery.ListPeers()
+	if len(peers) == 0 {
+		return Result{Output: "No active users discovered. Run @users and try again."}, nil
+	}
+	sort.Slice(peers, func(i, j int) bool {
+		left := strings.ToLower(strings.TrimSpace(peers[i].Username)) + "|" + peers[i].IP
+		right := strings.ToLower(strings.TrimSpace(peers[j].Username)) + "|" + peers[j].IP
+		return left < right
+	})
+
+	peerOptions := make([]huh.Option[string], 0, len(peers))
+	for _, peer := range peers {
+		label := fmt.Sprintf("%s (%s)", safePeerLabel(peer.Username), peer.IP)
+		peerOptions = append(peerOptions, huh.NewOption(label, peer.IP))
+	}
+
+	selectedIP := ""
+	action := ""
+	message := ""
+	targetPath := ""
+	confirmed := false
+
+	if err := huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Choose recipient").
+				Description("Pick one discovered Bonjou peer").
+				Options(peerOptions...).
+				Value(&selectedIP),
+		),
+	).Run(); err != nil {
+		return Result{Output: "Wizard cancelled."}, nil
+	}
+
+	if err := huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("What do you want to send?").
+				Options(
+					huh.NewOption("Message", "message"),
+					huh.NewOption("File", "file"),
+					huh.NewOption("Folder", "folder"),
+				).
+				Value(&action),
+		),
+	).Run(); err != nil {
+		return Result{Output: "Wizard cancelled."}, nil
+	}
+
+	if action == "message" {
+		if err := huh.NewForm(
+			huh.NewGroup(
+				huh.NewInput().
+					Title("Message").
+					Placeholder("Type your message").
+					Validate(func(value string) error {
+						if strings.TrimSpace(value) == "" {
+							return errors.New("message cannot be empty")
+						}
+						return nil
+					}).
+					Value(&message),
+			),
+		).Run(); err != nil {
+			return Result{Output: "Wizard cancelled."}, nil
+		}
+	} else {
+		pathTitle := "File path"
+		if action == "folder" {
+			pathTitle = "Folder path"
+		}
+		if err := huh.NewForm(
+			huh.NewGroup(
+				huh.NewInput().
+					Title(pathTitle).
+					Placeholder("~/Downloads/example.txt").
+					Validate(func(value string) error {
+						normalized, err := normalizePathArg(value)
+						if err != nil {
+							return err
+						}
+						info, err := os.Stat(normalized)
+						if err != nil {
+							return err
+						}
+						if action == "file" && info.IsDir() {
+							return errors.New("selected path is a directory")
+						}
+						if action == "folder" && !info.IsDir() {
+							return errors.New("selected path is not a directory")
+						}
+						return nil
+					}).
+					Value(&targetPath),
+			),
+		).Run(); err != nil {
+			return Result{Output: "Wizard cancelled."}, nil
+		}
+	}
+
+	if err := huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title("Send now?").
+				Affirmative("Send").
+				Negative("Cancel").
+				Value(&confirmed),
+		),
+	).Run(); err != nil {
+		return Result{Output: "Wizard cancelled."}, nil
+	}
+	if !confirmed {
+		return Result{Output: "Wizard cancelled. Nothing was sent."}, nil
+	}
+
+	peer, err := h.resolvePeer(selectedIP)
+	if err != nil {
+		return Result{}, err
+	}
+
+	switch action {
+	case "message":
+		if err := h.session.Transfer.SendMessage(peer, message); err != nil {
+			return Result{}, err
+		}
+		return Result{Output: fmt.Sprintf("Sent message to %s", peerLabel(peer))}, nil
+	case "file":
+		path, err := normalizePathArg(targetPath)
+		if err != nil {
+			return Result{}, err
+		}
+		if err := h.session.Transfer.SendFile(peer, path); err != nil {
+			return Result{}, err
+		}
+		return Result{}, nil
+	case "folder":
+		path, err := normalizePathArg(targetPath)
+		if err != nil {
+			return Result{}, err
+		}
+		if err := h.session.Transfer.SendFolder(peer, path); err != nil {
+			return Result{}, err
+		}
+		return Result{}, nil
+	default:
+		return Result{}, fmt.Errorf("unsupported wizard action: %s", action)
+	}
+}
+
 func (h *Handler) cmdHistory() (Result, error) {
 	entries, err := h.session.History.ReadAll()
 	if err != nil {
@@ -408,7 +587,20 @@ func (h *Handler) cmdHistory() (Result, error) {
 func (h *Handler) cmdSetPath(arg string) (Result, error) {
 	dir := strings.TrimSpace(arg)
 	if dir == "" {
-		return Result{Output: "Usage: @setpath <dir>"}, nil
+		picked, err := promptTextInput("Receive directory", "Choose base directory for incoming files/folders", "", func(value string) error {
+			normalized, normErr := normalizePathArg(value)
+			if normErr != nil {
+				return normErr
+			}
+			if err := os.MkdirAll(normalized, 0o755); err != nil {
+				return err
+			}
+			return nil
+		})
+		if err != nil {
+			return Result{Output: "Usage: @setpath <dir>"}, nil
+		}
+		dir = picked
 	}
 	dir, err := normalizePathArg(dir)
 	if err != nil {
@@ -430,7 +622,23 @@ func (h *Handler) cmdSetPath(arg string) (Result, error) {
 func (h *Handler) cmdSetName(arg string) (Result, error) {
 	name := strings.TrimSpace(arg)
 	if name == "" {
-		return Result{Output: "Usage: @setname <username>"}, nil
+		picked, err := promptTextInput("Username", "Set your visible Bonjou name", h.session.Config.Username, func(value string) error {
+			trimmed := strings.TrimSpace(value)
+			if trimmed == "" {
+				return errors.New("username cannot be blank")
+			}
+			if strings.ContainsAny(trimmed, "\n\r") {
+				return errors.New("username cannot contain newlines")
+			}
+			if len(trimmed) > 64 {
+				return errors.New("username must be 64 characters or fewer")
+			}
+			return nil
+		})
+		if err != nil {
+			return Result{Output: "Usage: @setname <username>"}, nil
+		}
+		name = picked
 	}
 	if strings.ContainsAny(name, "\n\r") {
 		return Result{Output: "Username cannot contain newlines."}, nil
@@ -498,6 +706,13 @@ func (h *Handler) cmdClear(arg string) (Result, error) {
 		return Result{Clear: true}, nil
 	}
 	if strings.EqualFold(arg, "history") {
+		confirmed, err := promptConfirm("Clear history?", "This removes saved local history entries.")
+		if err != nil {
+			return Result{Output: "History clear cancelled."}, nil
+		}
+		if !confirmed {
+			return Result{Output: "History clear cancelled."}, nil
+		}
 		if err := h.session.History.Clear(); err != nil {
 			return Result{}, err
 		}
@@ -523,6 +738,123 @@ func (h *Handler) resolvePeer(target string) (*network.Peer, error) {
 		return nil, err
 	}
 	return peer, nil
+}
+
+func (h *Handler) resolveOrPromptPeer(target, title string) (*network.Peer, error) {
+	trimmed := strings.TrimSpace(target)
+	if trimmed != "" {
+		return h.resolvePeer(trimmed)
+	}
+	if h.session == nil || h.session.Discovery == nil {
+		return nil, errors.New("discovery service unavailable")
+	}
+	peers := h.session.Discovery.ListPeers()
+	if len(peers) == 0 {
+		return nil, errors.New("no active users discovered")
+	}
+	sort.Slice(peers, func(i, j int) bool {
+		left := strings.ToLower(strings.TrimSpace(peers[i].Username)) + "|" + peers[i].IP
+		right := strings.ToLower(strings.TrimSpace(peers[j].Username)) + "|" + peers[j].IP
+		return left < right
+	})
+	selectedIP := ""
+	options := make([]huh.Option[string], 0, len(peers))
+	for _, peer := range peers {
+		label := fmt.Sprintf("%s (%s)", safePeerLabel(peer.Username), peer.IP)
+		options = append(options, huh.NewOption(label, peer.IP))
+	}
+	if err := huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title(title).
+				Options(options...).
+				Value(&selectedIP),
+		),
+	).Run(); err != nil {
+		return nil, err
+	}
+	return h.resolvePeer(selectedIP)
+}
+
+func (h *Handler) resolveOrPromptPath(rawPath, kind string) (string, error) {
+	trimmed := strings.TrimSpace(rawPath)
+	if trimmed == "" {
+		title := "File path"
+		description := "Choose a file to send"
+		if strings.EqualFold(kind, "folder") {
+			title = "Folder path"
+			description = "Choose a folder to send"
+		}
+		picked, err := promptTextInput(title, description, "", func(value string) error {
+			normalized, normErr := normalizePathArg(value)
+			if normErr != nil {
+				return normErr
+			}
+			info, statErr := os.Stat(normalized)
+			if statErr != nil {
+				return statErr
+			}
+			if strings.EqualFold(kind, "folder") && !info.IsDir() {
+				return errors.New("path is not a directory")
+			}
+			if strings.EqualFold(kind, "file") && info.IsDir() {
+				return errors.New("path is a directory")
+			}
+			return nil
+		})
+		if err != nil {
+			return "", err
+		}
+		trimmed = picked
+	}
+	path, err := normalizePathArg(trimmed)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if strings.EqualFold(kind, "folder") && !info.IsDir() {
+		return "", errors.New("path is not a directory")
+	}
+	if strings.EqualFold(kind, "file") && info.IsDir() {
+		return "", errors.New("path is a directory")
+	}
+	return path, nil
+}
+
+func promptTextInput(title, description, initial string, validate func(string) error) (string, error) {
+	value := initial
+	field := huh.NewInput().
+		Title(title).
+		Value(&value)
+	if strings.TrimSpace(description) != "" {
+		field = field.Description(description)
+	}
+	if validate != nil {
+		field = field.Validate(validate)
+	}
+	if err := huh.NewForm(huh.NewGroup(field)).Run(); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(value), nil
+}
+
+func promptConfirm(title, description string) (bool, error) {
+	confirmed := false
+	field := huh.NewConfirm().
+		Title(title).
+		Affirmative("Yes").
+		Negative("No").
+		Value(&confirmed)
+	if strings.TrimSpace(description) != "" {
+		field = field.Description(description)
+	}
+	if err := huh.NewForm(huh.NewGroup(field)).Run(); err != nil {
+		return false, err
+	}
+	return confirmed, nil
 }
 
 func peerLabel(peer *network.Peer) string {
@@ -730,6 +1062,7 @@ func helpText() string {
 	b.WriteString(reset)
 	b.WriteString(heading + "Bonjou Command Guide" + reset + "\n")
 	b.WriteString(dim + "Prefix every command with @. Quote paths that contain spaces." + reset + "\n\n")
+	b.WriteString(dim + "If required values are missing, Bonjou opens guided prompts for key commands." + reset + "\n\n")
 
 	b.WriteString(heading + "Messaging" + reset + "\n")
 	b.WriteString("  " + accent + "@send <user/ip> <message>" + reset + "\n")
@@ -739,6 +1072,8 @@ func helpText() string {
 	b.WriteString("    Automatically uses parallel for speed; falls back to sequential if transfers fail." + "\n")
 	b.WriteString("  " + accent + "@broadcast <message>" + reset + "\n")
 	b.WriteString("    Push the same announcement to every discovered peer." + "\n\n")
+	b.WriteString("  " + accent + "@wizard" + reset + "\n")
+	b.WriteString("    Interactive flow for recipient + message/file/folder sends." + "\n\n")
 
 	b.WriteString(heading + "File Transfer" + reset + "\n")
 	b.WriteString("  " + accent + "@file <user/ip> <path>" + reset + "\n")
