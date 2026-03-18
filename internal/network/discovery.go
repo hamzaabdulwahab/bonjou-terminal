@@ -259,7 +259,10 @@ func (d *DiscoveryService) listenLoop() {
 		if d.isStopping() {
 			return
 		}
-		conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			d.logger.Error("discovery deadline error: %v", err)
+			continue
+		}
 		n, remote, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {

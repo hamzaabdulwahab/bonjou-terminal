@@ -56,14 +56,16 @@ func (m *Manager) AppendTransfer(from, to, path string, size int64, kind string)
 func (m *Manager) append(path, entry string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
-	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 	_, err = file.WriteString(entry)
 	return err
 }
@@ -122,7 +124,9 @@ func readLines(path string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 	var lines []string
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {

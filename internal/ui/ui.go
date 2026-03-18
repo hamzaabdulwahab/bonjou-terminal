@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,14 +42,6 @@ var (
 
 var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]`)
 
-var welcomeBanner = []string{
-	` ____   ___  _   _       _  ___  _   _ `,
-	`| __ ) / _ \| \ | |     | |/ _ \| | | |`,
-	`|  _ \| | | |  \| |  _  | | | | | | | |`,
-	`| |_) | |_| | |\  | | |_| | |_| | |_| |`,
-	`|____/ \___/|_| \_|  \___/ \___/ \___/ `,
-}
-
 // welcomeBannerV2 renders BONJOU in the larry3d figlet font.
 // The original welcomeBanner is preserved above for comparison.
 var welcomeBannerV2 = []string{
@@ -69,7 +62,6 @@ type UI struct {
 
 	printMu    sync.Mutex
 	progressMu sync.Mutex
-	homeDir    string
 
 	progressActive bool
 	progressID     string
@@ -77,7 +69,8 @@ type UI struct {
 }
 
 func New(session *session.Session, handler *commands.Handler) (*UI, error) {
-	interactive := term.IsTerminal(int(os.Stdin.Fd()))
+	stdinFD, ok := fdToInt(os.Stdin.Fd())
+	interactive := ok && term.IsTerminal(stdinFD)
 	cfg := &readline.Config{
 		Prompt:                 colorMuted + "> " + colorReset,
 		InterruptPrompt:        colorMuted + "^C" + colorReset + "\n",
@@ -97,28 +90,39 @@ func New(session *session.Session, handler *commands.Handler) (*UI, error) {
 	if !interactive {
 		fmt.Fprintln(os.Stderr, colorMuted+"(Limited terminal detected; line editing shortcuts may be unavailable.)"+colorReset)
 	}
-	home, _ := os.UserHomeDir()
 	return &UI{
 		session: session,
 		handler: handler,
 		rl:      rl,
 		done:    make(chan struct{}),
-		homeDir: home,
 	}, nil
 }
 
 func configureReadline(cfg *readline.Config) {
 	cfg.HistoryLimit = 1024
 	cfg.FuncIsTerminal = func() bool {
-		return term.IsTerminal(int(os.Stdin.Fd()))
+		stdinFD, ok := fdToInt(os.Stdin.Fd())
+		return ok && term.IsTerminal(stdinFD)
 	}
 	cfg.FuncGetWidth = func() int {
-		width, _, err := term.GetSize(int(os.Stdout.Fd()))
+		stdoutFD, ok := fdToInt(os.Stdout.Fd())
+		if !ok {
+			return bannerWidth
+		}
+		width, _, err := term.GetSize(stdoutFD)
 		if err != nil || width <= 0 {
 			return bannerWidth
 		}
 		return width
 	}
+}
+
+func fdToInt(fd uintptr) (int, bool) {
+	parsed, err := strconv.ParseInt(strconv.FormatUint(uint64(fd), 10), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return int(parsed), true
 }
 
 // Run starts the interactive Bonjou session.
@@ -437,20 +441,6 @@ func (u *UI) formatProgressLine(ps *events.ProgressState, percent float64, done 
 	return composeProgressLine(summary, metrics, percent, barWidth, maxWidth)
 }
 
-func (u *UI) colorizePath(path string) string {
-	clean := path
-	if u.homeDir != "" && strings.HasPrefix(path, u.homeDir) {
-		suffix := strings.TrimPrefix(path, u.homeDir)
-		suffix = strings.TrimPrefix(suffix, string(os.PathSeparator))
-		if suffix == "" {
-			clean = "~"
-		} else {
-			clean = "~" + string(os.PathSeparator) + suffix
-		}
-	}
-	return colorPrimary + clean + colorReset
-}
-
 func (u *UI) progressTarget(ps *events.ProgressState, limit int) string {
 	var label string
 	switch strings.ToLower(ps.Kind) {
@@ -602,7 +592,11 @@ func humanBytes(n int64) string {
 }
 
 func (u *UI) terminalWidth() int {
-	width, _, err := term.GetSize(int(os.Stdout.Fd()))
+	stdoutFD, ok := fdToInt(os.Stdout.Fd())
+	if !ok {
+		return bannerWidth
+	}
+	width, _, err := term.GetSize(stdoutFD)
 	if err == nil && width > 0 {
 		return width
 	}

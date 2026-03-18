@@ -99,7 +99,7 @@ func Default() *Config {
 // Save persists configuration to disk.
 func (c *Config) Save() error {
 	c.populateDerived()
-	if err := os.MkdirAll(filepath.Dir(c.configPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(c.configPath), 0o750); err != nil {
 		return err
 	}
 	c.LastUpdated = time.Now().Unix()
@@ -141,7 +141,7 @@ func (c *Config) EnsureDirectories() error {
 	c.populateDerived()
 	dirs := []string{c.BaseDir, c.SaveDir, c.LogDir, c.ReceivedFilesDir, c.ReceivedFoldersDir}
 	for _, dir := range dirs {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return err
 		}
 	}

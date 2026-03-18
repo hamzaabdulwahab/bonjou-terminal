@@ -595,7 +595,7 @@ func (h *Handler) cmdSetPath(arg string) (Result, error) {
 			if normErr != nil {
 				return normErr
 			}
-			if err := os.MkdirAll(normalized, 0o755); err != nil {
+			if err := os.MkdirAll(normalized, 0o750); err != nil {
 				return err
 			}
 			return nil

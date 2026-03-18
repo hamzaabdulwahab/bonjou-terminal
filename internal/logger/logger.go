@@ -18,12 +18,12 @@ type Logger struct {
 
 // New creates a file-based logger rooted at dir.
 func New(dir string) (*Logger, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, err
 	}
 	name := fmt.Sprintf("bonjou-%s.log", time.Now().Format("20060102"))
 	path := filepath.Join(dir, name)
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, err
 	}

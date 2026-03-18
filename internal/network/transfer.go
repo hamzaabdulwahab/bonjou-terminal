@@ -14,9 +14,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,11 +30,12 @@ import (
 )
 
 const (
-	kindMessage = "message"
-	kindFile    = "file"
-	kindFolder  = "folder"
-	kindAck     = "ack"
-	ackTimeout  = 12 * time.Second
+	kindMessage                    = "message"
+	kindFile                       = "file"
+	kindFolder                     = "folder"
+	kindAck                        = "ack"
+	ackTimeout                     = 12 * time.Second
+	maxExtractedFolderBytes uint64 = 4 * 1024 * 1024 * 1024
 )
 
 var errServiceStopping = errors.New("transfer service stopping")
@@ -150,7 +153,7 @@ func (t *TransferService) Stop() {
 	t.stopOnce.Do(func() {
 		close(t.stop)
 		if t.listener != nil {
-			t.listener.Close()
+			_ = t.listener.Close()
 		}
 	})
 	t.wait.Wait()
@@ -172,7 +175,9 @@ func (t *TransferService) acceptLoop() {
 		t.wait.Add(1)
 		go func(c net.Conn) {
 			defer t.wait.Done()
-			defer c.Close()
+			defer func() {
+				_ = c.Close()
+			}()
 			if err := t.handleConnection(c); err != nil {
 				if errors.Is(err, errServiceStopping) {
 					return
@@ -279,7 +284,9 @@ func (t *TransferService) SendFile(peer *Peer, path string) (err error) {
 	if err != nil {
 		return fmt.Errorf("cannot read file for transfer: %v", err)
 	}
-	defer tf.file.Close()
+	defer func() {
+		_ = tf.file.Close()
+	}()
 	env := &envelope{
 		Kind:       kindFile,
 		TransferID: newTransferID(),
@@ -341,7 +348,9 @@ func (t *TransferService) SendFolder(peer *Peer, dir string) (err error) {
 	if err != nil {
 		return fmt.Errorf("cannot read compressed archive for transfer: %v", err)
 	}
-	defer tf.file.Close()
+	defer func() {
+		_ = tf.file.Close()
+	}()
 	env := &envelope{
 		Kind:       kindFolder,
 		TransferID: newTransferID(),
@@ -408,7 +417,9 @@ func (t *TransferService) sendEnvelope(peer *Peer, env *envelope, writer func(io
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	defer func() {
+		_ = conn.Close()
+	}()
 	sealed, err := sealEnvelope(env, shared)
 	if err != nil {
 		return err
@@ -445,7 +456,7 @@ func (t *TransferService) sendEnvelope(peer *Peer, env *envelope, writer func(io
 						if strings.EqualFold(ack.AckStatus, "ok") {
 							return nil
 						}
-						return fmt.Errorf("Delivery failed: %s '%s' to %s", transferKindLabel(env.Kind), transferDisplayName(env.Kind, env.Name), peerLabelOrIP(peer))
+						return fmt.Errorf("delivery failed: %s '%s' to %s", transferKindLabel(env.Kind), transferDisplayName(env.Kind, env.Name), peerLabelOrIP(peer))
 					}
 				}
 				return err
@@ -466,10 +477,10 @@ func (t *TransferService) signEnvelope(env *envelope, key []byte) string {
 	mac.Write([]byte(env.Name))
 	mac.Write([]byte(env.Checksum))
 	sizeBuf := make([]byte, 8)
-	binary.BigEndian.PutUint64(sizeBuf, uint64(env.Size))
+	binary.BigEndian.PutUint64(sizeBuf, int64ToUint64NonNegative(maxInt64(env.Size, 0)))
 	mac.Write(sizeBuf)
 	tsBuf := make([]byte, 8)
-	binary.BigEndian.PutUint64(tsBuf, uint64(env.Timestamp))
+	binary.BigEndian.PutUint64(tsBuf, int64ToUint64NonNegative(maxInt64(env.Timestamp, 0)))
 	mac.Write(tsBuf)
 	if env.Encrypted || env.Nonce != "" || env.Encoding != "" {
 		if env.Encrypted {
@@ -519,20 +530,20 @@ func (t *TransferService) receiveFile(conn net.Conn, env *envelope, key []byte) 
 	if err != nil {
 		return fmt.Errorf("invalid destination directory: %v", err)
 	}
-	if !strings.HasPrefix(absDestPath, absDirPath) {
+	if !isPathWithinBase(absDirPath, absDestPath) {
 		return fmt.Errorf("path traversal not allowed: file would be written outside received directory")
 	}
 
-	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(destPath), 0o750); err != nil {
 		return err
 	}
-	file, err := os.Create(destPath)
+	file, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
 	cleanup := true
 	defer func() {
-		file.Close()
+		_ = file.Close()
 		if cleanup {
 			_ = os.Remove(destPath)
 		}
@@ -592,13 +603,13 @@ func (t *TransferService) receiveFolder(conn net.Conn, env *envelope, key []byte
 		return errServiceStopping
 	}
 	tempPath := uniquePath(filepath.Join(os.TempDir(), env.Name))
-	file, err := os.Create(tempPath)
+	file, err := os.OpenFile(tempPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		file.Close()
-		os.Remove(tempPath)
+		_ = file.Close()
+		_ = os.Remove(tempPath)
 	}()
 	hasher := sha256.New()
 	progressID := fmt.Sprintf("recv:%s", env.Name)
@@ -648,11 +659,11 @@ func (t *TransferService) receiveFolder(conn net.Conn, env *envelope, key []byte
 	if err != nil {
 		return fmt.Errorf("invalid destination directory: %v", err)
 	}
-	if !strings.HasPrefix(absDestDir, absFolderPath) {
+	if !isPathWithinBase(absFolderPath, absDestDir) {
 		return fmt.Errorf("path traversal not allowed: folder would be written outside received directory")
 	}
 
-	if err := os.MkdirAll(destDir, 0o755); err != nil {
+	if err := os.MkdirAll(destDir, 0o750); err != nil {
 		return err
 	}
 	if err := unzip(tempPath, destDir); err != nil {
@@ -872,7 +883,7 @@ func (t *TransferService) awaitInlineDeliveryAck(conn net.Conn, shared []byte, s
 	}
 	t.renderDeliveryAck(ack)
 	if !strings.EqualFold(ack.AckStatus, "ok") {
-		return fmt.Errorf("Delivery failed: %s '%s' to %s", transferKindLabel(sent.Kind), transferDisplayName(sent.Kind, sent.Name), strings.TrimSpace(sent.To))
+		return fmt.Errorf("delivery failed: %s '%s' to %s", transferKindLabel(sent.Kind), transferDisplayName(sent.Kind, sent.Name), strings.TrimSpace(sent.To))
 	}
 	return nil
 }
@@ -1019,9 +1030,7 @@ func (t *TransferService) registerPendingAck(key string) chan *envelope {
 
 func (t *TransferService) unregisterPendingAck(key string) {
 	t.pendingAckMu.Lock()
-	if _, ok := t.pendingAcks[key]; ok {
-		delete(t.pendingAcks, key)
-	}
+	delete(t.pendingAcks, key)
 	t.pendingAckMu.Unlock()
 }
 
@@ -1260,8 +1269,14 @@ func (t *TransferService) sharedKey(peerPublicKey string) ([]byte, error) {
 }
 
 func writeEnvelope(conn net.Conn, data []byte) error {
-	header := make([]byte, 4)
-	binary.BigEndian.PutUint32(header, uint32(len(data)))
+	if len(data) > math.MaxUint32 {
+		return fmt.Errorf("envelope too large: %d bytes", len(data))
+	}
+	headerHex := fmt.Sprintf("%08x", len(data))
+	header, err := hex.DecodeString(headerHex)
+	if err != nil || len(header) != 4 {
+		return fmt.Errorf("failed to encode envelope length")
+	}
 	if _, err := conn.Write(header); err != nil {
 		return err
 	}
@@ -1474,16 +1489,16 @@ func openTransferFile(path string) (*transferFile, error) {
 	}
 	stat, err := f.Stat()
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, err
 	}
 	hasher := sha256.New()
 	if _, err := io.Copy(hasher, f); err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, fmt.Errorf("failed to read file for checksum: %w", err)
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, fmt.Errorf("failed to seek file for streaming: %w", err)
 	}
 	return &transferFile{
@@ -1516,8 +1531,15 @@ func zipDirectory(dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer tempFile.Close()
+	defer func() {
+		_ = tempFile.Close()
+	}()
 	archive := zip.NewWriter(tempFile)
+	type fileEntry struct {
+		abs string
+		rel string
+	}
+	filesToArchive := make([]fileEntry, 0)
 	err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -1540,32 +1562,52 @@ func zipDirectory(dir string) (string, error) {
 			_, err := archive.Create(rel + "/")
 			return err
 		}
-		header, err := zip.FileInfoHeader(info)
-		if err != nil {
-			return err
-		}
-		header.Name = rel
-		header.Method = zip.Deflate
-		writer, err := archive.CreateHeader(header)
-		if err != nil {
-			return err
-		}
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("folder contains an unsupported special file: %s", path)
 		}
-		file, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		if _, err := io.Copy(writer, file); err != nil {
-			file.Close()
-			return err
-		}
-		return file.Close()
+		filesToArchive = append(filesToArchive, fileEntry{abs: path, rel: rel})
+		return nil
 	})
 	if err != nil {
-		archive.Close()
+		_ = archive.Close()
 		return "", err
+	}
+	for _, entry := range filesToArchive {
+		info, statErr := os.Stat(entry.abs)
+		if statErr != nil {
+			_ = archive.Close()
+			return "", statErr
+		}
+		if !info.Mode().IsRegular() {
+			_ = archive.Close()
+			return "", fmt.Errorf("folder contains an unsupported special file: %s", entry.abs)
+		}
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			_ = archive.Close()
+			return "", err
+		}
+		header.Name = entry.rel
+		header.Method = zip.Deflate
+		writer, err := archive.CreateHeader(header)
+		if err != nil {
+			_ = archive.Close()
+			return "", err
+		}
+		file, err := os.Open(entry.abs)
+		if err != nil {
+			_ = archive.Close()
+			return "", err
+		}
+		if _, err := io.Copy(writer, file); err != nil {
+			_ = file.Close()
+			_ = archive.Close()
+			return "", err
+		}
+		if err := file.Close(); err != nil {
+			_ = archive.Close()
+			return "", err
+		}
 	}
 	if err := archive.Close(); err != nil {
 		return "", err
@@ -1579,15 +1621,22 @@ func unzip(zipPath, dest string) error {
 		return err
 	}
 	defer reader.Close()
+	var extractedBytes uint64
 	for _, file := range reader.File {
-		targetPath := filepath.Join(dest, file.Name)
+		targetPath, err := secureArchivePath(dest, file.Name)
+		if err != nil {
+			return err
+		}
+		if willOverflowUint64Add(extractedBytes, file.UncompressedSize64) || extractedBytes+file.UncompressedSize64 > maxExtractedFolderBytes {
+			return fmt.Errorf("extracted data exceeds allowed limit")
+		}
 		if file.FileInfo().IsDir() {
-			if err := os.MkdirAll(targetPath, 0o755); err != nil {
+			if err := os.MkdirAll(targetPath, 0o750); err != nil {
 				return err
 			}
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0o750); err != nil {
 			return err
 		}
 		src, err := file.Open()
@@ -1596,18 +1645,102 @@ func unzip(zipPath, dest string) error {
 		}
 		dst, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, file.Mode())
 		if err != nil {
-			src.Close()
+			_ = src.Close()
 			return err
 		}
-		if _, err := io.Copy(dst, src); err != nil {
-			src.Close()
-			dst.Close()
+		entryLimit, ok := uint64ToInt64(file.UncompressedSize64)
+		if !ok {
+			_ = src.Close()
+			_ = dst.Close()
+			return fmt.Errorf("archive entry too large")
+		}
+		readLimit := entryLimit
+		if readLimit < math.MaxInt64 {
+			readLimit++
+		}
+		written, err := io.Copy(dst, io.LimitReader(src, readLimit))
+		if err != nil {
+			_ = src.Close()
+			_ = dst.Close()
 			return err
 		}
-		src.Close()
+		writtenBytes := int64ToUint64NonNegative(written)
+		if writtenBytes > file.UncompressedSize64 {
+			_ = src.Close()
+			_ = dst.Close()
+			return fmt.Errorf("archive entry exceeds declared size")
+		}
+		if willOverflowUint64Add(extractedBytes, writtenBytes) {
+			_ = src.Close()
+			_ = dst.Close()
+			return fmt.Errorf("extracted data exceeds allowed limit")
+		}
+		extractedBytes += writtenBytes
+		_ = src.Close()
 		if err := dst.Close(); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func maxInt64(value int64, floor int64) int64 {
+	if value < floor {
+		return floor
+	}
+	return value
+}
+
+func int64ToUint64NonNegative(value int64) uint64 {
+	if value <= 0 {
+		return 0
+	}
+	parsed, err := strconv.ParseUint(strconv.FormatInt(value, 10), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return parsed
+}
+
+func uint64ToInt64(value uint64) (int64, bool) {
+	parsed, err := strconv.ParseInt(strconv.FormatUint(value, 10), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return parsed, true
+}
+
+func willOverflowUint64Add(a, b uint64) bool {
+	return a > math.MaxUint64-b
+}
+
+func secureArchivePath(baseDir, archiveName string) (string, error) {
+	clean := filepath.Clean(archiveName)
+	if clean == "." || clean == "" {
+		return "", fmt.Errorf("invalid archive entry path")
+	}
+	if filepath.IsAbs(clean) {
+		return "", fmt.Errorf("invalid absolute archive path: %s", archiveName)
+	}
+	target := filepath.Join(baseDir, clean)
+	if !isPathWithinBase(baseDir, target) {
+		return "", fmt.Errorf("archive entry escapes destination directory: %s", archiveName)
+	}
+	return target, nil
+}
+
+func isPathWithinBase(baseDir, targetPath string) bool {
+	baseAbs, err := filepath.Abs(baseDir)
+	if err != nil {
+		return false
+	}
+	targetAbs, err := filepath.Abs(targetPath)
+	if err != nil {
+		return false
+	}
+	if baseAbs == targetAbs {
+		return true
+	}
+	prefix := baseAbs + string(os.PathSeparator)
+	return strings.HasPrefix(targetAbs, prefix)
 }
