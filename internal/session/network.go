@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hamzawahab/bonjou-cli/internal/config"
-	"github.com/hamzawahab/bonjou-cli/internal/events"
+	"github.com/hamzaabdulwahab/bonjou-cli/internal/config"
+	"github.com/hamzaabdulwahab/bonjou-cli/internal/events"
 )
 
 // LocalIP returns the current LAN IP address advertised by the session.

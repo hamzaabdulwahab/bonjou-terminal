@@ -1,4 +1,4 @@
-module github.com/hamzawahab/bonjou-cli
+module github.com/hamzaabdulwahab/bonjou-cli
 
 go 1.24.0
 

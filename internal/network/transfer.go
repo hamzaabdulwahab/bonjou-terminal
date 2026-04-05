@@ -23,10 +23,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hamzawahab/bonjou-cli/internal/config"
-	"github.com/hamzawahab/bonjou-cli/internal/events"
-	"github.com/hamzawahab/bonjou-cli/internal/history"
-	"github.com/hamzawahab/bonjou-cli/internal/logger"
+	"github.com/hamzaabdulwahab/bonjou-cli/internal/config"
+	"github.com/hamzaabdulwahab/bonjou-cli/internal/events"
+	"github.com/hamzaabdulwahab/bonjou-cli/internal/history"
+	"github.com/hamzaabdulwahab/bonjou-cli/internal/logger"
 )
 
 const (

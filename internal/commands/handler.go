@@ -14,9 +14,9 @@ import (
 
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/hamzawahab/bonjou-cli/internal/history"
-	"github.com/hamzawahab/bonjou-cli/internal/network"
-	"github.com/hamzawahab/bonjou-cli/internal/session"
+	"github.com/hamzaabdulwahab/bonjou-cli/internal/history"
+	"github.com/hamzaabdulwahab/bonjou-cli/internal/network"
+	"github.com/hamzaabdulwahab/bonjou-cli/internal/session"
 )
 
 var ErrUnknownCommand = errors.New("unknown command")
