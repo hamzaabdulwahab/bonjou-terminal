@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/charmbracelet/huh"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/hamzawahab/bonjou-cli/internal/history"
 	"github.com/hamzawahab/bonjou-cli/internal/network"
 	"github.com/hamzawahab/bonjou-cli/internal/session"
@@ -33,6 +34,75 @@ type Handler struct {
 
 func New(session *session.Session) *Handler {
 	return &Handler{session: session}
+}
+
+// bonjouTheme returns a custom huh theme matching Bonjou's purple→blue gradient
+// aesthetic with rounded borders for a polished interactive experience.
+func bonjouTheme() *huh.Theme {
+	t := huh.ThemeBase()
+
+	var (
+		purple    = lipgloss.Color("#A182FD")
+		blue      = lipgloss.Color("#5EB6FF")
+		green     = lipgloss.Color("#02BF87")
+		red       = lipgloss.Color("#ED567A")
+		muted     = lipgloss.Color("#6C6C6C")
+		normalFg  = lipgloss.AdaptiveColor{Light: "235", Dark: "252"}
+		buttonBg  = lipgloss.AdaptiveColor{Light: "252", Dark: "237"}
+	)
+
+	// Focused field: rounded border on all sides with purple accent.
+	t.Focused.Base = lipgloss.NewStyle().
+		PaddingLeft(1).
+		PaddingRight(1).
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderTop(true).
+		BorderBottom(true).
+		BorderLeft(true).
+		BorderRight(true).
+		BorderForeground(purple)
+	t.Focused.Card = t.Focused.Base
+	t.Focused.Title = lipgloss.NewStyle().Foreground(purple).Bold(true)
+	t.Focused.Description = lipgloss.NewStyle().Foreground(muted)
+	t.Focused.ErrorIndicator = lipgloss.NewStyle().Foreground(red).SetString(" *")
+	t.Focused.ErrorMessage = lipgloss.NewStyle().Foreground(red).SetString(" *")
+
+	// Select styles.
+	t.Focused.SelectSelector = lipgloss.NewStyle().Foreground(blue).SetString("▸ ")
+	t.Focused.NextIndicator = lipgloss.NewStyle().Foreground(blue).MarginLeft(1).SetString("→")
+	t.Focused.PrevIndicator = lipgloss.NewStyle().Foreground(blue).MarginRight(1).SetString("←")
+	t.Focused.Option = lipgloss.NewStyle().Foreground(normalFg)
+
+	// Multi-select styles.
+	t.Focused.MultiSelectSelector = lipgloss.NewStyle().Foreground(blue).SetString("▸ ")
+	t.Focused.SelectedOption = lipgloss.NewStyle().Foreground(green)
+	t.Focused.SelectedPrefix = lipgloss.NewStyle().Foreground(green).SetString("✓ ")
+	t.Focused.UnselectedPrefix = lipgloss.NewStyle().Foreground(muted).SetString("○ ")
+	t.Focused.UnselectedOption = lipgloss.NewStyle().Foreground(normalFg)
+
+	// Text input.
+	t.Focused.TextInput.Cursor = lipgloss.NewStyle().Foreground(blue)
+	t.Focused.TextInput.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("#555555"))
+	t.Focused.TextInput.Prompt = lipgloss.NewStyle().Foreground(purple)
+
+	// Buttons.
+	button := lipgloss.NewStyle().Padding(0, 2).MarginRight(1)
+	t.Focused.FocusedButton = button.Foreground(lipgloss.Color("#FFFFFF")).Background(purple).Bold(true)
+	t.Focused.BlurredButton = button.Foreground(normalFg).Background(buttonBg)
+	t.Focused.Next = t.Focused.FocusedButton
+
+	// Blurred: same as focused but with hidden border.
+	t.Blurred = t.Focused
+	t.Blurred.Base = t.Blurred.Base.BorderStyle(lipgloss.HiddenBorder())
+	t.Blurred.Card = t.Blurred.Base
+	t.Blurred.NextIndicator = lipgloss.NewStyle()
+	t.Blurred.PrevIndicator = lipgloss.NewStyle()
+
+	// Group styles.
+	t.Group.Title = t.Focused.Title
+	t.Group.Description = t.Focused.Description
+
+	return t
 }
 
 // Handle parses command input and executes matching action.
@@ -449,7 +519,7 @@ func (h *Handler) cmdWizard() (Result, error) {
 				Options(peerOptions...).
 				Value(&selectedIP),
 		),
-	).Run(); err != nil {
+	).WithTheme(bonjouTheme()).Run(); err != nil {
 		return Result{Output: "Wizard cancelled. Returned to command prompt."}, nil
 	}
 
@@ -462,7 +532,7 @@ func (h *Handler) cmdWizard() (Result, error) {
 		action := ""
 		message := ""
 		targetPath := ""
-		confirmed := false
+		confirmed := true
 
 		if err := huh.NewForm(
 			huh.NewGroup(
@@ -475,7 +545,7 @@ func (h *Handler) cmdWizard() (Result, error) {
 					).
 					Value(&action),
 			),
-		).Run(); err != nil {
+		).WithTheme(bonjouTheme()).Run(); err != nil {
 			return Result{Output: "Wizard cancelled. Returned to command prompt."}, nil
 		}
 
@@ -493,7 +563,7 @@ func (h *Handler) cmdWizard() (Result, error) {
 						}).
 						Value(&message),
 				),
-			).Run(); err != nil {
+			).WithTheme(bonjouTheme()).Run(); err != nil {
 				return Result{Output: "Wizard cancelled. Returned to command prompt."}, nil
 			}
 		} else {
@@ -525,7 +595,7 @@ func (h *Handler) cmdWizard() (Result, error) {
 						}).
 						Value(&targetPath),
 				),
-			).Run(); err != nil {
+			).WithTheme(bonjouTheme()).Run(); err != nil {
 				return Result{Output: "Wizard cancelled. Returned to command prompt."}, nil
 			}
 		}
@@ -538,7 +608,7 @@ func (h *Handler) cmdWizard() (Result, error) {
 					Negative("Cancel").
 					Value(&confirmed),
 			),
-		).Run(); err != nil {
+		).WithTheme(bonjouTheme()).Run(); err != nil {
 			return Result{Output: "Wizard cancelled. Returned to command prompt."}, nil
 		}
 		if !confirmed {
@@ -773,7 +843,7 @@ func (h *Handler) resolveOrPromptPeer(target, title string) (*network.Peer, erro
 				Options(options...).
 				Value(&selectedIP),
 		),
-	).Run(); err != nil {
+	).WithTheme(bonjouTheme()).Run(); err != nil {
 		return nil, err
 	}
 	return h.resolvePeer(selectedIP)
@@ -838,7 +908,7 @@ func promptTextInput(title, description, initial string, validate func(string) e
 	if validate != nil {
 		field = field.Validate(validate)
 	}
-	if err := huh.NewForm(huh.NewGroup(field)).Run(); err != nil {
+	if err := huh.NewForm(huh.NewGroup(field)).WithTheme(bonjouTheme()).Run(); err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(value), nil
@@ -854,7 +924,7 @@ func promptConfirm(title, description string) (bool, error) {
 	if strings.TrimSpace(description) != "" {
 		field = field.Description(description)
 	}
-	if err := huh.NewForm(huh.NewGroup(field)).Run(); err != nil {
+	if err := huh.NewForm(huh.NewGroup(field)).WithTheme(bonjouTheme()).Run(); err != nil {
 		return false, err
 	}
 	return confirmed, nil

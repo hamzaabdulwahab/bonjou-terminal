@@ -205,7 +205,7 @@ func (c *Config) populateDerived() {
 func randomHex(n int) string {
 	buf := make([]byte, n)
 	if _, err := rand.Read(buf); err != nil {
-		return ""
+		panic("bonjou: system random number generator is unavailable — cannot generate secure keys: " + err.Error())
 	}
 	return hex.EncodeToString(buf)
 }

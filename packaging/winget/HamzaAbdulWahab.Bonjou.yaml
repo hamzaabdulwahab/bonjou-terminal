@@ -25,7 +25,7 @@ Installers:
 - Architecture: x64
   InstallerType: portable
   InstallerUrl: https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v1.1.0/bonjou.exe
-  InstallerSha256: c3c6dd5fabf8f03128a92289547a3e8e4b74c46254497052f26349d0106210b6
+  InstallerSha256: 696086d121736a8de9e3d75130f83b095ab5fd8a4c9f20c0fda49a33545edb10
   Commands:
   - bonjou
   PortableCommandAlias: bonjou

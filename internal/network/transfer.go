@@ -203,7 +203,7 @@ func (t *TransferService) handleConnection(conn net.Conn) error {
 		return err
 	}
 	if env.Encrypted && strings.TrimSpace(env.Nonce) == "" {
-		return errors.New("encrypted payload missing nonce")
+		return errors.New("received a malformed encrypted message — the sender may be running an older version of Bonjou")
 	}
 	switch env.Kind {
 	case kindMessage:
@@ -384,7 +384,7 @@ func (t *TransferService) sendEnvelope(peer *Peer, env *envelope, writer func(io
 		return errServiceStopping
 	}
 	if strings.TrimSpace(peer.PublicKey) == "" {
-		return errors.New("peer public key unknown; update peer and rediscover")
+		return errors.New("could not send — this peer's encryption key is not available yet. Wait for them to show up in @users, then try again")
 	}
 	shared, err := t.sharedKey(peer.PublicKey)
 	if err != nil {
@@ -498,19 +498,19 @@ func (t *TransferService) signEnvelope(env *envelope, key []byte) string {
 
 func (t *TransferService) verifyEnvelope(env *envelope, key []byte) error {
 	if len(key) == 0 {
-		return errors.New("missing envelope key")
+		return errors.New("cannot verify incoming data — encryption key not available")
 	}
 	expected := t.signEnvelope(env, key)
 	expectedBytes, err := hex.DecodeString(expected)
 	if err != nil {
-		return fmt.Errorf("unable to compute signature for %s: %w", env.From, err)
+		return fmt.Errorf("could not verify data from %s — internal error", env.From)
 	}
 	providedBytes, err := hex.DecodeString(env.HMAC)
 	if err != nil {
-		return fmt.Errorf("invalid signature data from %s: %w", env.From, err)
+		return fmt.Errorf("received invalid verification data from %s — they may be running a different version of Bonjou", env.From)
 	}
 	if !hmac.Equal(expectedBytes, providedBytes) {
-		return fmt.Errorf("discarded %s from %s (%s): signature mismatch", env.Kind, env.From, env.FromIP)
+		return fmt.Errorf("rejected %s from %s (%s) — the data could not be verified as authentic (possible version mismatch or tampering)", env.Kind, env.From, env.FromIP)
 	}
 	return nil
 }
@@ -923,7 +923,7 @@ func (t *TransferService) verifyEnvelopeWithKey(env *envelope, key []byte) error
 		return fmt.Errorf("invalid signature data: %w", err)
 	}
 	if !hmac.Equal(expectedBytes, providedBytes) {
-		return errors.New("signature mismatch")
+		return errors.New("delivery confirmation could not be verified — the peer may be running a different version")
 	}
 	return nil
 }
@@ -995,7 +995,7 @@ func (t *TransferService) resolvePeerForAck(source *envelope) (*Peer, error) {
 	}
 	publicKey, ok := t.discovery.SharedPublicKey(source.From, ip)
 	if !ok || strings.TrimSpace(publicKey) == "" {
-		return nil, fmt.Errorf("peer key unavailable for %s (%s)", source.From, ip)
+		return nil, fmt.Errorf("could not verify peer %s (%s) — wait for them to appear in @users and try again", source.From, ip)
 	}
 	return &Peer{Username: source.From, IP: ip, Port: t.cfg.ListenPort, PublicKey: publicKey}, nil
 }
@@ -1194,7 +1194,7 @@ func deriveCipherKey(shared []byte) []byte {
 
 func newCipherStream(shared []byte, nonce []byte) (cipher.Stream, error) {
 	if len(nonce) != aes.BlockSize {
-		return nil, fmt.Errorf("invalid nonce length")
+		return nil, fmt.Errorf("received a malformed encryption parameter — the sender may be running a different version of Bonjou")
 	}
 	key := deriveCipherKey(shared)
 	block, err := aes.NewCipher(key)
@@ -1263,7 +1263,7 @@ func (t *TransferService) sharedKey(peerPublicKey string) ([]byte, error) {
 	}
 	key, err := sharedKeyFromPeerPublic(t.cfg.Secret, peerPublicKey)
 	if err != nil {
-		return nil, fmt.Errorf("derive shared key from peer public key: %w", err)
+		return nil, fmt.Errorf("could not establish a secure connection with this peer — they may be running a different version of Bonjou")
 	}
 	return key, nil
 }
@@ -1306,10 +1306,10 @@ func (t *TransferService) readSecureEnvelope(conn net.Conn) (*envelope, []byte, 
 	}
 	remoteIPs := remoteIPCandidates(conn)
 	if len(remoteIPs) == 0 {
-		return nil, nil, errors.New("unable to resolve remote address")
+		return nil, nil, errors.New("could not identify the sender — connection may have dropped")
 	}
 	if t.discovery == nil {
-		return nil, nil, errors.New("discovery service unavailable")
+		return nil, nil, errors.New("network discovery is not running — try restarting Bonjou")
 	}
 	var publicKey string
 	for _, ip := range remoteIPs {
@@ -1319,7 +1319,7 @@ func (t *TransferService) readSecureEnvelope(conn net.Conn) (*envelope, []byte, 
 		}
 	}
 	if strings.TrimSpace(publicKey) == "" {
-		return nil, nil, fmt.Errorf("peer key unavailable for %s", remoteIPs[0])
+		return nil, nil, fmt.Errorf("could not verify the sender at %s — they may have just come online. Try again shortly", remoteIPs[0])
 	}
 	shared, err := t.sharedKey(publicKey)
 	if err != nil {
@@ -1366,7 +1366,7 @@ func openEnvelope(frame []byte, shared []byte) (*envelope, error) {
 		return nil, err
 	}
 	if sealed.Encoding != "" && sealed.Encoding != "base64" {
-		return nil, fmt.Errorf("unsupported envelope encoding: %s", sealed.Encoding)
+		return nil, fmt.Errorf("received data in an unsupported format (%s) — the sender may be running a newer version of Bonjou", sealed.Encoding)
 	}
 	nonce, err := hex.DecodeString(sealed.Nonce)
 	if err != nil {
@@ -1385,7 +1385,7 @@ func openEnvelope(frame []byte, shared []byte) (*envelope, error) {
 	mac.Write(nonce)
 	mac.Write(cipherText)
 	if !hmac.Equal(mac.Sum(nil), providedMAC) {
-		return nil, errors.New("invalid envelope signature")
+		return nil, errors.New("received data could not be decrypted — the sender may be running a different version of Bonjou")
 	}
 	stream, err := newCipherStream(shared, nonce)
 	if err != nil {
