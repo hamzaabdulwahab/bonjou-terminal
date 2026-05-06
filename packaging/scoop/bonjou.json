@@ -2,6 +2,7 @@
   "version": "1.1.0",
   "description": "Terminal-based LAN chat and transfer application",
   "homepage": "https://github.com/hamzaabdulwahab/bonjou-cli",
+  "icon": "https://raw.githubusercontent.com/hamzaabdulwahab/bonjou-cli/main/logo.png",
   "license": "MIT",
   "architecture": {
     "64bit": {

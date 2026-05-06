@@ -6,12 +6,14 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/hamzawahab/bonjou-cli/internal/history"
@@ -20,6 +22,22 @@ import (
 )
 
 var ErrUnknownCommand = errors.New("unknown command")
+
+var (
+	errWizardExit        = errors.New("wizard exit")
+	errWizardNoPeers     = errors.New("wizard no active peers")
+	errWizardBack        = errors.New("wizard back")
+	errWizardNoSelection = errors.New("wizard no recipients selected")
+	wizardAnchorSet      bool
+	ansiPrefixPattern    = regexp.MustCompile(`^(?:\x1b\[[0-9;?]*[A-Za-z])+`)
+)
+
+// WizardRenderActive reports whether the wizard currently owns a saved render anchor.
+func WizardRenderActive() bool {
+	return wizardAnchorSet
+}
+
+const wizardBackValue = "__wizard_back__"
 
 // Result carries command execution outcome back to the UI.
 type Result struct {
@@ -36,78 +54,9 @@ func New(session *session.Session) *Handler {
 	return &Handler{session: session}
 }
 
-// bonjouTheme returns a custom huh theme matching Bonjou's purple→blue gradient
-// aesthetic with rounded borders for a polished interactive experience.
-func bonjouTheme() *huh.Theme {
-	t := huh.ThemeBase()
-
-	var (
-		purple    = lipgloss.Color("#A182FD")
-		blue      = lipgloss.Color("#5EB6FF")
-		green     = lipgloss.Color("#02BF87")
-		red       = lipgloss.Color("#ED567A")
-		muted     = lipgloss.Color("#6C6C6C")
-		normalFg  = lipgloss.AdaptiveColor{Light: "235", Dark: "252"}
-		buttonBg  = lipgloss.AdaptiveColor{Light: "252", Dark: "237"}
-	)
-
-	// Focused field: rounded border on all sides with purple accent.
-	t.Focused.Base = lipgloss.NewStyle().
-		PaddingLeft(1).
-		PaddingRight(1).
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderTop(true).
-		BorderBottom(true).
-		BorderLeft(true).
-		BorderRight(true).
-		BorderForeground(purple)
-	t.Focused.Card = t.Focused.Base
-	t.Focused.Title = lipgloss.NewStyle().Foreground(purple).Bold(true)
-	t.Focused.Description = lipgloss.NewStyle().Foreground(muted)
-	t.Focused.ErrorIndicator = lipgloss.NewStyle().Foreground(red).SetString(" *")
-	t.Focused.ErrorMessage = lipgloss.NewStyle().Foreground(red).SetString(" *")
-
-	// Select styles.
-	t.Focused.SelectSelector = lipgloss.NewStyle().Foreground(blue).SetString("▸ ")
-	t.Focused.NextIndicator = lipgloss.NewStyle().Foreground(blue).MarginLeft(1).SetString("→")
-	t.Focused.PrevIndicator = lipgloss.NewStyle().Foreground(blue).MarginRight(1).SetString("←")
-	t.Focused.Option = lipgloss.NewStyle().Foreground(normalFg)
-
-	// Multi-select styles.
-	t.Focused.MultiSelectSelector = lipgloss.NewStyle().Foreground(blue).SetString("▸ ")
-	t.Focused.SelectedOption = lipgloss.NewStyle().Foreground(green)
-	t.Focused.SelectedPrefix = lipgloss.NewStyle().Foreground(green).SetString("✓ ")
-	t.Focused.UnselectedPrefix = lipgloss.NewStyle().Foreground(muted).SetString("○ ")
-	t.Focused.UnselectedOption = lipgloss.NewStyle().Foreground(normalFg)
-
-	// Text input.
-	t.Focused.TextInput.Cursor = lipgloss.NewStyle().Foreground(blue)
-	t.Focused.TextInput.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("#555555"))
-	t.Focused.TextInput.Prompt = lipgloss.NewStyle().Foreground(purple)
-
-	// Buttons.
-	button := lipgloss.NewStyle().Padding(0, 2).MarginRight(1)
-	t.Focused.FocusedButton = button.Foreground(lipgloss.Color("#FFFFFF")).Background(purple).Bold(true)
-	t.Focused.BlurredButton = button.Foreground(normalFg).Background(buttonBg)
-	t.Focused.Next = t.Focused.FocusedButton
-
-	// Blurred: same as focused but with hidden border.
-	t.Blurred = t.Focused
-	t.Blurred.Base = t.Blurred.Base.BorderStyle(lipgloss.HiddenBorder())
-	t.Blurred.Card = t.Blurred.Base
-	t.Blurred.NextIndicator = lipgloss.NewStyle()
-	t.Blurred.PrevIndicator = lipgloss.NewStyle()
-
-	// Group styles.
-	t.Group.Title = t.Focused.Title
-	t.Group.Description = t.Focused.Description
-
-	return t
-}
-
 // Handle parses command input and executes matching action.
 func (h *Handler) Handle(input string) (Result, error) {
-	trimmed := strings.TrimSpace(input)
+	trimmed := sanitizeCommandInput(input)
 	if trimmed == "" {
 		return Result{}, nil
 	}
@@ -147,8 +96,22 @@ func (h *Handler) Handle(input string) (Result, error) {
 		return h.cmdStatus()
 	case "clear":
 		return h.cmdClear(args)
-	case "exit":
+	case "exit", "quit":
+		return h.cmdExit()
+	case "exit!", "quit!":
 		return Result{Quit: true}, nil
+	case "queue":
+		return h.cmdQueue()
+	case "approve":
+		return h.cmdApprove(args)
+	case "reject":
+		return h.cmdReject(args)
+	case "approveAll":
+		return h.cmdApproveAll()
+	case "rejectAll":
+		return h.cmdRejectAll()
+	case "view":
+		return h.cmdView(args)
 	default:
 		return Result{}, ErrUnknownCommand
 	}
@@ -177,34 +140,17 @@ func (h *Handler) cmdUsers() (Result, error) {
 }
 
 func (h *Handler) cmdSend(parts []string, args string) (Result, error) {
-	target := ""
-	if len(parts) >= 2 {
-		target = parts[1]
+	if len(parts) < 2 {
+		return Result{Output: "Usage: @send <user/ip> <message>"}, nil
 	}
-	message := ""
-	if target != "" {
-		message = strings.TrimSpace(strings.TrimPrefix(args, target))
-	}
-	peer, err := h.resolveOrPromptPeer(target, "Choose recipient")
-	if err != nil {
-		if len(parts) < 2 {
-			return Result{Output: "Usage: @send <user/ip> <message>"}, nil
-		}
-		return Result{}, err
-	}
+	target := parts[1]
+	message := strings.TrimSpace(strings.TrimPrefix(args, target))
 	if message == "" {
-		message, err = promptTextInput("Message", "Type your message", "", func(value string) error {
-			if strings.TrimSpace(value) == "" {
-				return errors.New("message cannot be empty")
-			}
-			return nil
-		})
-		if err != nil {
-			if len(parts) < 2 {
-				return Result{Output: "Usage: @send <user/ip> <message>"}, nil
-			}
-			return Result{Output: "Send cancelled."}, nil
-		}
+		return Result{Output: "Message cannot be empty."}, nil
+	}
+	peer, err := h.resolvePeer(target)
+	if err != nil {
+		return Result{}, err
 	}
 	if err := h.session.Transfer.SendMessage(peer, message); err != nil {
 		return Result{}, err
@@ -213,59 +159,55 @@ func (h *Handler) cmdSend(parts []string, args string) (Result, error) {
 }
 
 func (h *Handler) cmdFile(parts []string, args string) (Result, error) {
-	target := ""
-	if len(parts) >= 2 {
-		target = parts[1]
+	if len(parts) < 3 {
+		return Result{Output: "Usage: @file <user/ip> <path>"}, nil
 	}
-	peer, err := h.resolveOrPromptPeer(target, "Choose file recipient")
+	target := parts[1]
+	rawPath := strings.TrimSpace(strings.TrimPrefix(args, target))
+	path, err := normalizePathArg(rawPath)
 	if err != nil {
-		if len(parts) < 3 {
-			return Result{Output: "Usage: @file <user/ip> <path>"}, nil
-		}
 		return Result{}, err
 	}
-	rawPath := ""
-	if target != "" {
-		rawPath = strings.TrimSpace(strings.TrimPrefix(args, target))
-	}
-	path, err := h.resolveOrPromptPath(rawPath, "file")
+	info, err := os.Stat(path)
 	if err != nil {
-		if len(parts) < 3 {
-			return Result{Output: "Usage: @file <user/ip> <path>"}, nil
-		}
+		return Result{}, err
+	}
+	if info.IsDir() {
+		return Result{Output: "Path is a directory. Use @folder instead."}, nil
+	}
+	peer, err := h.resolvePeer(target)
+	if err != nil {
 		return Result{}, err
 	}
 	if err := h.session.Transfer.SendFile(peer, path); err != nil {
-		return Result{}, nil
+		return Result{}, err
 	}
 	return Result{}, nil
 }
 
 func (h *Handler) cmdFolder(parts []string, args string) (Result, error) {
-	target := ""
-	if len(parts) >= 2 {
-		target = parts[1]
+	if len(parts) < 3 {
+		return Result{Output: "Usage: @folder <user/ip> <dir>"}, nil
 	}
-	peer, err := h.resolveOrPromptPeer(target, "Choose folder recipient")
+	target := parts[1]
+	rawPath := strings.TrimSpace(strings.TrimPrefix(args, target))
+	path, err := normalizePathArg(rawPath)
 	if err != nil {
-		if len(parts) < 3 {
-			return Result{Output: "Usage: @folder <user/ip> <dir>"}, nil
-		}
 		return Result{}, err
 	}
-	rawPath := ""
-	if target != "" {
-		rawPath = strings.TrimSpace(strings.TrimPrefix(args, target))
-	}
-	path, err := h.resolveOrPromptPath(rawPath, "folder")
+	info, err := os.Stat(path)
 	if err != nil {
-		if len(parts) < 3 {
-			return Result{Output: "Usage: @folder <user/ip> <dir>"}, nil
-		}
+		return Result{}, err
+	}
+	if !info.IsDir() {
+		return Result{Output: "Path is not a directory."}, nil
+	}
+	peer, err := h.resolvePeer(target)
+	if err != nil {
 		return Result{}, err
 	}
 	if err := h.session.Transfer.SendFolder(peer, path); err != nil {
-		return Result{}, nil
+		return Result{}, err
 	}
 	return Result{}, nil
 }
@@ -469,7 +411,7 @@ func (h *Handler) cmdBroadcast(message string) (Result, error) {
 	}
 	peers := h.session.Discovery.ListPeers()
 	if len(peers) == 0 {
-		return Result{Output: "No peers to broadcast to."}, nil
+		return Result{Output: "No active users discovered."}, nil
 	}
 	var errs []string
 	for _, peer := range peers {
@@ -489,160 +431,692 @@ func (h *Handler) cmdBroadcast(message string) (Result, error) {
 }
 
 func (h *Handler) cmdWizard() (Result, error) {
-	if h.session == nil || h.session.Discovery == nil || h.session.Transfer == nil {
-		return Result{}, errors.New("wizard is unavailable: session services are not ready")
+	resetWizardRenderAnchor()
+	defer resetWizardRenderAnchor()
+
+	status := ""
+	for {
+		action := ""
+		description := "Choose what to send. Press Ctrl+C anytime to exit wizard."
+
+		if err := runWizardMenuForm(
+			status,
+			huh.NewForm(
+				huh.NewGroup(
+					huh.NewSelect[string]().
+						Title("Bonjou Wizard").
+						Description(description).
+						Options(
+							huh.NewOption("Send message", "message"),
+							huh.NewOption("Send file", "file"),
+							huh.NewOption("Send folder", "folder"),
+							huh.NewOption("Send to multiple users", "multi"),
+							huh.NewOption("Broadcast", "broadcast"),
+						).
+						Value(&action),
+				),
+			),
+		); err != nil {
+			return Result{Output: "Wizard closed. Returned to command prompt."}, nil
+		}
+
+		var actionStatus string
+		var err error
+		switch action {
+		case "message":
+			actionStatus, err = h.wizardSendSingle("message")
+		case "file":
+			actionStatus, err = h.wizardSendSingle("file")
+		case "folder":
+			actionStatus, err = h.wizardSendSingle("folder")
+		case "multi":
+			actionStatus, err = h.wizardSendMulti()
+		case "broadcast":
+			actionStatus, err = h.wizardSendBroadcast()
+		default:
+			actionStatus = fmt.Sprintf("Unsupported wizard action: %s", action)
+		}
+
+		if errors.Is(err, errWizardExit) {
+			return Result{Output: "Wizard closed. Returned to command prompt."}, nil
+		}
+		if errors.Is(err, errWizardBack) {
+			status = wizardStatusInfo("Back to wizard menu.")
+			continue
+		}
+		if err != nil {
+			status = wizardStatusError(err.Error())
+			continue
+		}
+
+		status = strings.TrimSpace(actionStatus)
+		if status == "" {
+			h.waitForWizardEventFlush(900 * time.Millisecond)
+			status = wizardStatusInfo("Ready for another action.")
+			continue
+		}
+	}
+}
+
+func (h *Handler) waitForWizardEventFlush(timeout time.Duration) {
+	if h == nil || h.session == nil || h.session.Events == nil {
+		return
+	}
+	deadline := time.Now().Add(timeout)
+	quietReads := 0
+	for time.Now().Before(deadline) {
+		if len(h.session.Events) == 0 {
+			quietReads++
+			if quietReads >= 3 {
+				return
+			}
+		} else {
+			quietReads = 0
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func (h *Handler) wizardSendSingle(kind string) (string, error) {
+	peer, err := h.wizardSelectPeer("Choose recipient")
+	if err != nil {
+		if errors.Is(err, errWizardNoPeers) {
+			return wizardStatusError("No active users discovered. Use @users to refresh discovery and try again."), nil
+		}
+		if errors.Is(err, errWizardBack) {
+			return "", errWizardBack
+		}
+		if errors.Is(err, errWizardExit) {
+			return "", errWizardExit
+		}
+		return "", err
 	}
 
-	peers := h.session.Discovery.ListPeers()
-	if len(peers) == 0 {
-		return Result{Output: "No active users discovered. Run @users and try again."}, nil
+	confirmed := false
+	submitLabel := "Submit"
+
+	switch kind {
+	case "message":
+		message, err := wizardMessageInput("Message", "Type your message")
+		if err != nil {
+			if errors.Is(err, errWizardBack) {
+				return "", errWizardBack
+			}
+			if errors.Is(err, errWizardExit) {
+				return "", errWizardExit
+			}
+			return "", err
+		}
+		confirmed, err = wizardConfirm("Send message now?", submitLabel)
+		if err != nil {
+			if errors.Is(err, errWizardExit) {
+				return "", errWizardExit
+			}
+			return "", err
+		}
+		if !confirmed {
+			return wizardStatusInfo("Cancelled. Nothing was sent."), nil
+		}
+		detachWizardForExternalOutput()
+		if err := h.session.Transfer.SendMessage(peer, message); err != nil {
+			return wizardStatusError(fmt.Sprintf("Failed to send message to %s: %v", peerLabel(peer), err)), nil
+		}
+		return "", nil
+	case "file":
+		path, err := wizardPathInput("File path", "~/Downloads/example.txt", false)
+		if err != nil {
+			if errors.Is(err, errWizardBack) {
+				return "", errWizardBack
+			}
+			if errors.Is(err, errWizardExit) {
+				return "", errWizardExit
+			}
+			return "", err
+		}
+		confirmed, err = wizardConfirm("Send file now?", submitLabel)
+		if err != nil {
+			if errors.Is(err, errWizardExit) {
+				return "", errWizardExit
+			}
+			return "", err
+		}
+		if !confirmed {
+			return wizardStatusInfo("Cancelled. Nothing was sent."), nil
+		}
+		detachWizardForExternalOutput()
+		if err := h.session.Transfer.SendFile(peer, path); err != nil {
+			return "", nil
+		}
+		return "", nil
+	case "folder":
+		path, err := wizardPathInput("Folder path", "~/Downloads/my-folder", true)
+		if err != nil {
+			if errors.Is(err, errWizardBack) {
+				return "", errWizardBack
+			}
+			if errors.Is(err, errWizardExit) {
+				return "", errWizardExit
+			}
+			return "", err
+		}
+		confirmed, err = wizardConfirm("Send folder now?", submitLabel)
+		if err != nil {
+			if errors.Is(err, errWizardExit) {
+				return "", errWizardExit
+			}
+			return "", err
+		}
+		if !confirmed {
+			return wizardStatusInfo("Cancelled. Nothing was sent."), nil
+		}
+		detachWizardForExternalOutput()
+		if err := h.session.Transfer.SendFolder(peer, path); err != nil {
+			return "", nil
+		}
+		return "", nil
+	default:
+		return "", fmt.Errorf("unsupported single wizard kind: %s", kind)
 	}
+}
+
+func (h *Handler) wizardSendMulti() (string, error) {
+	for {
+		peers, err := h.wizardSelectPeers("Choose recipients")
+		if err != nil {
+			if errors.Is(err, errWizardNoPeers) {
+				return wizardStatusError("No active users discovered. Use @users to refresh discovery and try again."), nil
+			}
+			if errors.Is(err, errWizardNoSelection) {
+				return wizardStatusError("No recipients selected."), nil
+			}
+			if errors.Is(err, errWizardBack) {
+				return "", errWizardBack
+			}
+			if errors.Is(err, errWizardExit) {
+				return "", errWizardExit
+			}
+			return "", err
+		}
+
+		for {
+			transferKind, err := wizardSelectMultiTransferKind()
+			if err != nil {
+				if errors.Is(err, errWizardBack) {
+					break
+				}
+				if errors.Is(err, errWizardExit) {
+					return "", errWizardExit
+				}
+				return "", err
+			}
+
+			message := ""
+			path := ""
+			switch transferKind {
+			case "message":
+				message, err = wizardMessageInput("Message", "Type your message")
+				if err != nil {
+					if errors.Is(err, errWizardBack) {
+						continue
+					}
+					if errors.Is(err, errWizardExit) {
+						return "", errWizardExit
+					}
+					return "", err
+				}
+			case "file":
+				path, err = wizardPathInput("File path", "~/Downloads/example.txt", false)
+				if err != nil {
+					if errors.Is(err, errWizardBack) {
+						continue
+					}
+					if errors.Is(err, errWizardExit) {
+						return "", errWizardExit
+					}
+					return "", err
+				}
+			case "folder":
+				path, err = wizardPathInput("Folder path", "~/Downloads/my-folder", true)
+				if err != nil {
+					if errors.Is(err, errWizardBack) {
+						continue
+					}
+					if errors.Is(err, errWizardExit) {
+						return "", errWizardExit
+					}
+					return "", err
+				}
+			default:
+				return "", fmt.Errorf("unsupported multi wizard kind: %s", transferKind)
+			}
+
+			confirmed, err := wizardConfirm("Send now?", "Submit")
+			if err != nil {
+				if errors.Is(err, errWizardExit) {
+					return "", errWizardExit
+				}
+				return "", err
+			}
+			if !confirmed {
+				return wizardStatusInfo("Cancelled. Nothing was sent."), nil
+			}
+			detachWizardForExternalOutput()
+
+			success, errs := h.sendToPeers(peers, transferKind, message, path)
+			if len(errs) > 0 {
+				return wizardStatusError(fmt.Sprintf("Completed %d transfers, %d errors: %s", success, len(errs), strings.Join(errs, " | "))), nil
+			}
+			return wizardStatusInfo(fmt.Sprintf("Completed %d transfers", success)), nil
+		}
+	}
+}
+
+func (h *Handler) wizardSendBroadcast() (string, error) {
+	message, err := wizardMessageInput("Broadcast message", "Type your message")
+	if err != nil {
+		if errors.Is(err, errWizardBack) {
+			return "", errWizardBack
+		}
+		if errors.Is(err, errWizardExit) {
+			return "", errWizardExit
+		}
+		return "", err
+	}
+
+	confirmed, err := wizardConfirm("Send to all discovered users?", "Send to all")
+	if err != nil {
+		if errors.Is(err, errWizardExit) {
+			return "", errWizardExit
+		}
+		return "", err
+	}
+	if !confirmed {
+		return wizardStatusInfo("Cancelled. Nothing was sent."), nil
+	}
+	detachWizardForExternalOutput()
+
+	result, err := h.cmdBroadcast(message)
+	if err != nil {
+		return wizardStatusError(fmt.Sprintf("Broadcast failed: %v", err)), nil
+	}
+	if strings.TrimSpace(result.Output) == "" {
+		return wizardStatusInfo("Broadcast sent."), nil
+	}
+	if strings.EqualFold(strings.TrimSpace(result.Output), "No peers to broadcast to.") {
+		return wizardStatusError("No active users discovered. Use @users to refresh discovery and try again."), nil
+	}
+	if strings.HasPrefix(strings.TrimSpace(result.Output), "Broadcast completed with errors:") {
+		return wizardStatusError(result.Output), nil
+	}
+	return wizardStatusInfo(result.Output), nil
+}
+
+func (h *Handler) wizardSelectPeer(title string) (*network.Peer, error) {
+	peers := h.sortedPeers()
+	if len(peers) == 0 {
+		return nil, errWizardNoPeers
+	}
+
+	selectedIP := ""
+	options := make([]huh.Option[string], 0, len(peers))
+	options = append(options, huh.NewOption("← Back to wizard menu", wizardBackValue))
+	for _, peer := range peers {
+		label := fmt.Sprintf("%s (%s)", safePeerLabel(peer.Username), peer.IP)
+		options = append(options, huh.NewOption(label, peer.IP))
+	}
+
+	if err := runWizardForm(
+		huh.NewForm(
+			huh.NewGroup(
+				huh.NewSelect[string]().
+					Title(title).
+					Description("Select a user by username and IP.").
+					Options(options...).
+					Value(&selectedIP),
+			),
+		),
+	); err != nil {
+		return nil, errWizardExit
+	}
+	if selectedIP == wizardBackValue {
+		return nil, errWizardBack
+	}
+
+	return h.resolvePeer(selectedIP)
+}
+
+func (h *Handler) wizardSelectPeers(title string) ([]*network.Peer, error) {
+	peers := h.sortedPeers()
+	if len(peers) == 0 {
+		return nil, errWizardNoPeers
+	}
+
+	backToMenu := false
+	if err := runWizardForm(
+		huh.NewForm(
+			huh.NewGroup(
+				huh.NewConfirm().
+					Title(title).
+					Description("Select recipients, or go back to the wizard menu.").
+					Affirmative("Select recipients").
+					Negative("Back to wizard menu").
+					Value(&backToMenu),
+			),
+		),
+	); err != nil {
+		return nil, errWizardExit
+	}
+	if !backToMenu {
+		return nil, errWizardBack
+	}
+
+	selectedIPs := make([]string, 0)
+	options := make([]huh.Option[string], 0, len(peers))
+	for _, peer := range peers {
+		label := fmt.Sprintf("%s (%s)", safePeerLabel(peer.Username), peer.IP)
+		options = append(options, huh.NewOption(label, peer.IP))
+	}
+
+	if err := runWizardForm(
+		huh.NewForm(
+			huh.NewGroup(
+				huh.NewMultiSelect[string]().
+					Title(title).
+					Description("Select one or more users by username and IP.").
+					Options(options...).
+					Value(&selectedIPs),
+			),
+		),
+	); err != nil {
+		return nil, errWizardExit
+	}
+
+	if len(selectedIPs) == 0 {
+		return nil, errWizardNoSelection
+	}
+
+	selectedPeers := make([]*network.Peer, 0, len(selectedIPs))
+	for _, ip := range selectedIPs {
+		peer, err := h.resolvePeer(ip)
+		if err != nil {
+			return nil, err
+		}
+		selectedPeers = append(selectedPeers, peer)
+	}
+
+	return selectedPeers, nil
+}
+
+func (h *Handler) sortedPeers() []network.Peer {
+	peers := h.session.Discovery.ListPeers()
 	sort.Slice(peers, func(i, j int) bool {
 		left := strings.ToLower(strings.TrimSpace(peers[i].Username)) + "|" + peers[i].IP
 		right := strings.ToLower(strings.TrimSpace(peers[j].Username)) + "|" + peers[j].IP
 		return left < right
 	})
+	return peers
+}
 
-	peerOptions := make([]huh.Option[string], 0, len(peers))
-	for _, peer := range peers {
-		label := fmt.Sprintf("%s (%s)", safePeerLabel(peer.Username), peer.IP)
-		peerOptions = append(peerOptions, huh.NewOption(label, peer.IP))
+func wizardTextInput(title, placeholder string, validate func(string) error) (string, error) {
+	value := ""
+	field := huh.NewInput().
+		Title(title).
+		Description("Type /back to return to wizard menu.").
+		Placeholder(placeholder).
+		Value(&value)
+	if validate != nil {
+		field = field.Validate(func(input string) error {
+			if strings.EqualFold(strings.TrimSpace(input), "/back") {
+				return nil
+			}
+			return validate(input)
+		})
+	}
+	if err := runWizardForm(huh.NewForm(huh.NewGroup(field))); err != nil {
+		return "", errWizardExit
+	}
+	trimmed := strings.TrimSpace(value)
+	if strings.EqualFold(trimmed, "/back") {
+		return "", errWizardBack
+	}
+	return trimmed, nil
+}
+
+func wizardMessageInput(title, placeholder string) (string, error) {
+	value := ""
+	field := huh.NewText().
+		Title(title).
+		Description("Type /back to return to wizard menu.").
+		Placeholder(placeholder).
+		Lines(1).
+		ShowLineNumbers(false).
+		Value(&value).
+		Validate(func(input string) error {
+			normalized := normalizeMessageInput(input)
+			if strings.EqualFold(strings.TrimSpace(normalized), "/back") {
+				return nil
+			}
+			if strings.TrimSpace(normalized) == "" {
+				return errors.New("message cannot be empty")
+			}
+			return nil
+		})
+
+	if err := runWizardForm(huh.NewForm(huh.NewGroup(field))); err != nil {
+		return "", errWizardExit
 	}
 
-	selectedIP := ""
-
-	if err := huh.NewForm(
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Title("Choose recipient").
-				Description("Pick one discovered Bonjou peer. Press Ctrl+C anytime to exit wizard mode.").
-				Options(peerOptions...).
-				Value(&selectedIP),
-		),
-	).WithTheme(bonjouTheme()).Run(); err != nil {
-		return Result{Output: "Wizard cancelled. Returned to command prompt."}, nil
+	normalized := normalizeMessageInput(value)
+	if strings.EqualFold(strings.TrimSpace(normalized), "/back") {
+		return "", errWizardBack
 	}
+	return normalized, nil
+}
 
-	peer, err := h.resolvePeer(selectedIP)
-	if err != nil {
-		return Result{}, err
-	}
+func normalizeMessageInput(input string) string {
+	normalized := strings.ReplaceAll(input, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	return strings.TrimSpace(normalized)
+}
 
-	for {
-		action := ""
-		message := ""
-		targetPath := ""
-		confirmed := true
-
-		if err := huh.NewForm(
+func wizardSelectMultiTransferKind() (string, error) {
+	transferKind := ""
+	if err := runWizardForm(
+		huh.NewForm(
 			huh.NewGroup(
 				huh.NewSelect[string]().
 					Title("What do you want to send?").
+					Description("Choose a transfer type for the selected recipients.").
 					Options(
+						huh.NewOption("← Back to recipient selection", wizardBackValue),
 						huh.NewOption("Message", "message"),
 						huh.NewOption("File", "file"),
 						huh.NewOption("Folder", "folder"),
 					).
-					Value(&action),
+					Value(&transferKind),
 			),
-		).WithTheme(bonjouTheme()).Run(); err != nil {
-			return Result{Output: "Wizard cancelled. Returned to command prompt."}, nil
-		}
+		),
+	); err != nil {
+		return "", errWizardExit
+	}
+	if transferKind == wizardBackValue {
+		return "", errWizardBack
+	}
+	return transferKind, nil
+}
 
-		if action == "message" {
-			if err := huh.NewForm(
-				huh.NewGroup(
-					huh.NewInput().
-						Title("Message").
-						Placeholder("Type your message").
-						Validate(func(value string) error {
-							if strings.TrimSpace(value) == "" {
-								return errors.New("message cannot be empty")
-							}
-							return nil
-						}).
-						Value(&message),
-				),
-			).WithTheme(bonjouTheme()).Run(); err != nil {
-				return Result{Output: "Wizard cancelled. Returned to command prompt."}, nil
-			}
-		} else {
-			pathTitle := "File path"
-			if action == "folder" {
-				pathTitle = "Folder path"
-			}
-			if err := huh.NewForm(
-				huh.NewGroup(
-					huh.NewInput().
-						Title(pathTitle).
-						Placeholder("~/Downloads/example.txt").
-						Validate(func(value string) error {
-							normalized, err := normalizePathArg(value)
-							if err != nil {
-								return err
-							}
-							info, err := os.Stat(normalized)
-							if err != nil {
-								return err
-							}
-							if action == "file" && info.IsDir() {
-								return errors.New("selected path is a directory")
-							}
-							if action == "folder" && !info.IsDir() {
-								return errors.New("selected path is not a directory")
-							}
-							return nil
-						}).
-						Value(&targetPath),
-				),
-			).WithTheme(bonjouTheme()).Run(); err != nil {
-				return Result{Output: "Wizard cancelled. Returned to command prompt."}, nil
-			}
-		}
+func (h *Handler) sendToPeers(peers []*network.Peer, transferKind, message, path string) (int, []string) {
+	success := 0
+	errs := make([]string, 0)
 
-		if err := huh.NewForm(
-			huh.NewGroup(
-				huh.NewConfirm().
-					Title("Send now?").
-					Affirmative("Send").
-					Negative("Cancel").
-					Value(&confirmed),
-			),
-		).WithTheme(bonjouTheme()).Run(); err != nil {
-			return Result{Output: "Wizard cancelled. Returned to command prompt."}, nil
+	for _, peer := range peers {
+		var err error
+		switch transferKind {
+		case "message":
+			err = h.session.Transfer.SendMessage(peer, message)
+		case "file":
+			err = h.session.Transfer.SendFile(peer, path)
+		case "folder":
+			err = h.session.Transfer.SendFolder(peer, path)
+		default:
+			err = fmt.Errorf("unsupported multi wizard kind: %s", transferKind)
 		}
-		if !confirmed {
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", peerLabel(peer), err))
 			continue
 		}
-
-		switch action {
-		case "message":
-			if err := h.session.Transfer.SendMessage(peer, message); err != nil {
-				return Result{}, err
-			}
-			return Result{Output: fmt.Sprintf("Sent message to %s", peerLabel(peer))}, nil
-		case "file":
-			path, err := normalizePathArg(targetPath)
-			if err != nil {
-				return Result{}, err
-			}
-			if err := h.session.Transfer.SendFile(peer, path); err != nil {
-				return Result{}, err
-			}
-			return Result{}, nil
-		case "folder":
-			path, err := normalizePathArg(targetPath)
-			if err != nil {
-				return Result{}, err
-			}
-			if err := h.session.Transfer.SendFolder(peer, path); err != nil {
-				return Result{}, err
-			}
-			return Result{}, nil
-		default:
-			return Result{}, fmt.Errorf("unsupported wizard action: %s", action)
-		}
+		success++
 	}
+
+	return success, errs
+}
+
+func wizardPathInput(title, placeholder string, expectDir bool) (string, error) {
+	path, err := wizardTextInput(title, placeholder, func(value string) error {
+		normalized, err := normalizePathArg(value)
+		if err != nil {
+			return err
+		}
+		info, err := os.Stat(normalized)
+		if err != nil {
+			return err
+		}
+		if expectDir && !info.IsDir() {
+			return errors.New("selected path is not a directory")
+		}
+		if !expectDir && info.IsDir() {
+			return errors.New("selected path is a directory")
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return normalizePathArg(path)
+}
+
+func wizardConfirm(title, submitLabel string) (bool, error) {
+	confirmed := false
+	if err := runWizardForm(huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title(title).
+				Description("Press Ctrl+C to exit the wizard.").
+				Affirmative(submitLabel).
+				Negative("Cancel").
+				Value(&confirmed),
+		),
+	)); err != nil {
+		return false, errWizardExit
+	}
+	return confirmed, nil
+}
+
+func runWizardForm(form *huh.Form) error {
+	prepareWizardRenderArea()
+	return runWizardFormAtAnchor(form)
+}
+
+func runWizardMenuForm(status string, form *huh.Form) error {
+	prepareWizardRenderArea()
+	if strings.TrimSpace(status) != "" {
+		fmt.Fprintf(os.Stderr, "%s\n\n", status)
+		// Save a new anchor below status so status remains above the wizard box.
+		fmt.Fprint(os.Stderr, "\033[s")
+	}
+	return runWizardFormAtAnchor(form)
+}
+
+func runWizardFormAtAnchor(form *huh.Form) error {
+	return form.
+		WithTheme(wizardTheme()).
+		WithProgramOptions(
+			tea.WithANSICompressor(),
+			tea.WithOutput(os.Stderr),
+			tea.WithReportFocus(),
+		).
+		Run()
+}
+
+func resetWizardRenderAnchor() {
+	wizardAnchorSet = false
+}
+
+func prepareWizardRenderArea() {
+	if wizardAnchorSet {
+		// Restore to the previous wizard anchor and clear that region.
+		fmt.Fprint(os.Stderr, "\033[u\033[J")
+	}
+	// Save cursor as the anchor for the next redraw.
+	fmt.Fprint(os.Stderr, "\033[s")
+	wizardAnchorSet = true
+}
+
+func detachWizardForExternalOutput() {
+	if wizardAnchorSet {
+		// Remove the active wizard frame and release the anchor so upcoming
+		// transfer events stay visible above the next wizard render.
+		fmt.Fprint(os.Stderr, "\033[u\033[J")
+	}
+	wizardAnchorSet = false
+}
+
+func wizardTheme() *huh.Theme {
+	t := huh.ThemeCharm()
+	pink := lipgloss.AdaptiveColor{Light: "#FF2D96", Dark: "#FF4DA6"}
+	pinkSoft := lipgloss.AdaptiveColor{Light: "#FF6EB8", Dark: "#FF7BBF"}
+	white := lipgloss.AdaptiveColor{Light: "#FFFFFF", Dark: "#FFFFFF"}
+
+	t.Focused.Base = t.Focused.Base.
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(pinkSoft).
+		BorderTop(true).
+		BorderRight(true).
+		BorderBottom(true).
+		BorderLeft(true).
+		Padding(0, 1)
+	t.Focused.Card = t.Focused.Base
+	t.Focused.Title = t.Focused.Title.Foreground(pink).Bold(true)
+	t.Focused.NoteTitle = t.Focused.NoteTitle.Foreground(pink).Bold(true)
+	t.Focused.Description = t.Focused.Description.Foreground(lipgloss.AdaptiveColor{Light: "240", Dark: "245"})
+	t.Focused.SelectSelector = t.Focused.SelectSelector.Foreground(pink)
+	t.Focused.MultiSelectSelector = t.Focused.MultiSelectSelector.Foreground(pink)
+	t.Focused.NextIndicator = t.Focused.NextIndicator.Foreground(pink)
+	t.Focused.PrevIndicator = t.Focused.PrevIndicator.Foreground(pink)
+	t.Focused.SelectedPrefix = t.Focused.SelectedPrefix.Foreground(pink)
+	t.Focused.FocusedButton = t.Focused.FocusedButton.Foreground(white).Background(pink).Bold(true)
+	t.Focused.TextInput.Prompt = t.Focused.TextInput.Prompt.Foreground(pink)
+	t.Focused.TextInput.Cursor = t.Focused.TextInput.Cursor.Foreground(pink)
+	t.Focused.TextInput.CursorText = t.Focused.TextInput.CursorText.Foreground(white).Background(pink)
+
+	t.Blurred = t.Focused
+	t.Blurred.Base = t.Blurred.Base.BorderStyle(lipgloss.HiddenBorder())
+	t.Blurred.Card = t.Blurred.Base
+	t.Blurred.NextIndicator = lipgloss.NewStyle()
+	t.Blurred.PrevIndicator = lipgloss.NewStyle()
+
+	t.Group.Title = t.Focused.Title
+	t.Group.Description = t.Focused.Description
+	return t
+}
+
+func wizardStatusInfo(message string) string {
+	trimmed := strings.TrimSpace(message)
+	if trimmed == "" {
+		return ""
+	}
+	return "Info: " + trimmed
+}
+
+func wizardStatusError(message string) string {
+	trimmed := strings.TrimSpace(message)
+	if trimmed == "" {
+		return ""
+	}
+	if strings.HasPrefix(trimmed, "Error: ") {
+		return trimmed
+	}
+	return "Error: " + trimmed
 }
 
 func (h *Handler) cmdHistory() (Result, error) {
@@ -660,20 +1134,7 @@ func (h *Handler) cmdHistory() (Result, error) {
 func (h *Handler) cmdSetPath(arg string) (Result, error) {
 	dir := strings.TrimSpace(arg)
 	if dir == "" {
-		picked, err := promptTextInput("Receive directory", "Choose base directory for incoming files/folders", "", func(value string) error {
-			normalized, normErr := normalizePathArg(value)
-			if normErr != nil {
-				return normErr
-			}
-			if err := os.MkdirAll(normalized, 0o750); err != nil {
-				return err
-			}
-			return nil
-		})
-		if err != nil {
-			return Result{Output: "Usage: @setpath <dir>"}, nil
-		}
-		dir = picked
+		return Result{Output: "Usage: @setpath <dir>"}, nil
 	}
 	dir, err := normalizePathArg(dir)
 	if err != nil {
@@ -695,23 +1156,7 @@ func (h *Handler) cmdSetPath(arg string) (Result, error) {
 func (h *Handler) cmdSetName(arg string) (Result, error) {
 	name := strings.TrimSpace(arg)
 	if name == "" {
-		picked, err := promptTextInput("Username", "Set your visible Bonjou name", h.session.Config.Username, func(value string) error {
-			trimmed := strings.TrimSpace(value)
-			if trimmed == "" {
-				return errors.New("username cannot be blank")
-			}
-			if strings.ContainsAny(trimmed, "\n\r") {
-				return errors.New("username cannot contain newlines")
-			}
-			if len(trimmed) > 64 {
-				return errors.New("username must be 64 characters or fewer")
-			}
-			return nil
-		})
-		if err != nil {
-			return Result{Output: "Usage: @setname <username>"}, nil
-		}
-		name = picked
+		return Result{Output: "Usage: @setname <username>"}, nil
 	}
 	if strings.ContainsAny(name, "\n\r") {
 		return Result{Output: "Username cannot contain newlines."}, nil
@@ -762,12 +1207,19 @@ func (h *Handler) cmdSetName(arg string) (Result, error) {
 func (h *Handler) cmdStatus() (Result, error) {
 	cfg := h.session.Config
 	peers := h.session.Discovery.ListPeers()
+	fileCount := 0
+	folderCount := 0
+	if h.session.Queue != nil {
+		fileCount = len(h.session.Queue.ListFiles())
+		folderCount = len(h.session.Queue.ListFolders())
+	}
 	lines := []string{
 		fmt.Sprintf("Username: %s", cfg.Username),
 		fmt.Sprintf("Local IP: %s", h.session.LocalIP()),
 		fmt.Sprintf("Listen port: %d", cfg.ListenPort),
 		fmt.Sprintf("Discovery port: %d", cfg.DiscoveryPort),
 		fmt.Sprintf("Discovered peers: %d", len(peers)),
+		fmt.Sprintf("Pending approvals: %d (%d files, %d folders)", fileCount+folderCount, fileCount, folderCount),
 		fmt.Sprintf("Receive path: %s", cfg.SaveDir),
 	}
 	return Result{Output: strings.Join(lines, "\n")}, nil
@@ -779,19 +1231,51 @@ func (h *Handler) cmdClear(arg string) (Result, error) {
 		return Result{Clear: true}, nil
 	}
 	if strings.EqualFold(arg, "history") {
-		confirmed, err := promptConfirm("Clear history?", "This removes saved local history entries.")
-		if err != nil {
-			return Result{Output: "History clear cancelled."}, nil
-		}
-		if !confirmed {
-			return Result{Output: "History clear cancelled."}, nil
-		}
 		if err := h.session.History.Clear(); err != nil {
 			return Result{}, err
 		}
 		return Result{Output: "History cleared."}, nil
 	}
 	return Result{Output: "Usage: @clear [history]"}, nil
+}
+
+func (h *Handler) cmdExit() (Result, error) {
+	if h == nil || h.session == nil || h.session.Queue == nil {
+		return Result{Quit: true}, nil
+	}
+
+	fileCount := len(h.session.Queue.ListFiles())
+	folderCount := len(h.session.Queue.ListFolders())
+	total := fileCount + folderCount
+	if total == 0 {
+		return Result{Quit: true}, nil
+	}
+
+	return Result{
+		Output: fmt.Sprintf(
+			"There are %d pending approvals (%d files, %d folders). Review them with @queue, or force quit with @exit!.",
+			total,
+			fileCount,
+			folderCount,
+		),
+	}, nil
+}
+
+func sanitizeCommandInput(input string) string {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return ""
+	}
+
+	trimmed = ansiPrefixPattern.ReplaceAllString(trimmed, "")
+	trimmed = strings.TrimLeftFunc(trimmed, func(r rune) bool {
+		if unicode.IsSpace(r) {
+			return true
+		}
+		return unicode.IsControl(r)
+	})
+
+	return trimmed
 }
 
 func (h *Handler) resolvePeer(target string) (*network.Peer, error) {
@@ -811,123 +1295,6 @@ func (h *Handler) resolvePeer(target string) (*network.Peer, error) {
 		return nil, err
 	}
 	return peer, nil
-}
-
-func (h *Handler) resolveOrPromptPeer(target, title string) (*network.Peer, error) {
-	trimmed := strings.TrimSpace(target)
-	if trimmed != "" {
-		return h.resolvePeer(trimmed)
-	}
-	if h.session == nil || h.session.Discovery == nil {
-		return nil, errors.New("discovery service unavailable")
-	}
-	peers := h.session.Discovery.ListPeers()
-	if len(peers) == 0 {
-		return nil, errors.New("no active users discovered")
-	}
-	sort.Slice(peers, func(i, j int) bool {
-		left := strings.ToLower(strings.TrimSpace(peers[i].Username)) + "|" + peers[i].IP
-		right := strings.ToLower(strings.TrimSpace(peers[j].Username)) + "|" + peers[j].IP
-		return left < right
-	})
-	selectedIP := ""
-	options := make([]huh.Option[string], 0, len(peers))
-	for _, peer := range peers {
-		label := fmt.Sprintf("%s (%s)", safePeerLabel(peer.Username), peer.IP)
-		options = append(options, huh.NewOption(label, peer.IP))
-	}
-	if err := huh.NewForm(
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Title(title).
-				Options(options...).
-				Value(&selectedIP),
-		),
-	).WithTheme(bonjouTheme()).Run(); err != nil {
-		return nil, err
-	}
-	return h.resolvePeer(selectedIP)
-}
-
-func (h *Handler) resolveOrPromptPath(rawPath, kind string) (string, error) {
-	trimmed := strings.TrimSpace(rawPath)
-	if trimmed == "" {
-		title := "File path"
-		description := "Choose a file to send"
-		if strings.EqualFold(kind, "folder") {
-			title = "Folder path"
-			description = "Choose a folder to send"
-		}
-		picked, err := promptTextInput(title, description, "", func(value string) error {
-			normalized, normErr := normalizePathArg(value)
-			if normErr != nil {
-				return normErr
-			}
-			info, statErr := os.Stat(normalized)
-			if statErr != nil {
-				return statErr
-			}
-			if strings.EqualFold(kind, "folder") && !info.IsDir() {
-				return errors.New("path is not a directory")
-			}
-			if strings.EqualFold(kind, "file") && info.IsDir() {
-				return errors.New("path is a directory")
-			}
-			return nil
-		})
-		if err != nil {
-			return "", err
-		}
-		trimmed = picked
-	}
-	path, err := normalizePathArg(trimmed)
-	if err != nil {
-		return "", err
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return "", err
-	}
-	if strings.EqualFold(kind, "folder") && !info.IsDir() {
-		return "", errors.New("path is not a directory")
-	}
-	if strings.EqualFold(kind, "file") && info.IsDir() {
-		return "", errors.New("path is a directory")
-	}
-	return path, nil
-}
-
-func promptTextInput(title, description, initial string, validate func(string) error) (string, error) {
-	value := initial
-	field := huh.NewInput().
-		Title(title).
-		Value(&value)
-	if strings.TrimSpace(description) != "" {
-		field = field.Description(description)
-	}
-	if validate != nil {
-		field = field.Validate(validate)
-	}
-	if err := huh.NewForm(huh.NewGroup(field)).WithTheme(bonjouTheme()).Run(); err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(value), nil
-}
-
-func promptConfirm(title, description string) (bool, error) {
-	confirmed := false
-	field := huh.NewConfirm().
-		Title(title).
-		Affirmative("Yes").
-		Negative("No").
-		Value(&confirmed)
-	if strings.TrimSpace(description) != "" {
-		field = field.Description(description)
-	}
-	if err := huh.NewForm(huh.NewGroup(field)).WithTheme(bonjouTheme()).Run(); err != nil {
-		return false, err
-	}
-	return confirmed, nil
 }
 
 func peerLabel(peer *network.Peer) string {
@@ -1135,7 +1502,6 @@ func helpText() string {
 	b.WriteString(reset)
 	b.WriteString(heading + "Bonjou Command Guide" + reset + "\n")
 	b.WriteString(dim + "Prefix every command with @. Quote paths that contain spaces." + reset + "\n\n")
-	b.WriteString(dim + "If required values are missing, Bonjou opens guided prompts for key commands." + reset + "\n\n")
 
 	b.WriteString(heading + "Messaging" + reset + "\n")
 	b.WriteString("  " + accent + "@send <user/ip> <message>" + reset + "\n")
@@ -1144,21 +1510,21 @@ func helpText() string {
 	b.WriteString("    Target a list of peers; send chat text, a file, or a folder." + "\n")
 	b.WriteString("    Automatically uses parallel for speed; falls back to sequential if transfers fail." + "\n")
 	b.WriteString("  " + accent + "@broadcast <message>" + reset + "\n")
-	b.WriteString("    Push the same announcement to every discovered peer." + "\n\n")
+	b.WriteString("    Send the same message to every currently discovered peer." + "\n\n")
 	b.WriteString("  " + accent + "@wizard" + reset + "\n")
-	b.WriteString("    Interactive flow for recipient + message/file/folder sends." + "\n\n")
+	b.WriteString("    Interactive sender for message, file, folder, multi-send, and broadcast." + "\n\n")
 
 	b.WriteString(heading + "File Transfer" + reset + "\n")
 	b.WriteString("  " + accent + "@file <user/ip> <path>" + reset + "\n")
 	b.WriteString("    Share a single file. ~ expansion and quoted paths supported." + "\n")
 	b.WriteString("  " + accent + "@folder <user/ip> <dir>" + reset + "\n")
-	b.WriteString("    Stream an entire directory; handy for project hand-offs." + "\n")
+	b.WriteString("    Send an entire directory to one peer." + "\n")
 	b.WriteString("  " + accent + "@history" + reset + "\n")
 	b.WriteString("    Review recent sends, receives, and system notices." + "\n\n")
 
 	b.WriteString(heading + "Discovery & Status" + reset + "\n")
 	b.WriteString("  " + accent + "@users" + reset + "\n")
-	b.WriteString("    List online peers with last-seen timestamps." + "\n")
+	b.WriteString("    List discovered peers with last-seen timestamps." + "\n")
 	b.WriteString("  " + accent + "@whoami" + reset + "\n")
 	b.WriteString("    Show your username, LAN IP, and listening port." + "\n")
 	b.WriteString("  " + accent + "@setname <username>" + reset + "\n")
@@ -1169,12 +1535,26 @@ func helpText() string {
 	b.WriteString(heading + "Workspace & Maintenance" + reset + "\n")
 	b.WriteString("  " + accent + "@setpath <dir>" + reset + "\n")
 	b.WriteString("    Change where incoming files and folders are stored." + "\n")
+	b.WriteString("  " + accent + "@queue" + reset + "\n")
+	b.WriteString("    List every pending approval in one place." + "\n")
+	b.WriteString("  " + accent + "@view <id>" + reset + "\n")
+	b.WriteString("    Inspect one pending queue item." + "\n")
+	b.WriteString("  " + accent + "@approve <id>" + reset + "\n")
+	b.WriteString("    Approve one pending queue item." + "\n")
+	b.WriteString("  " + accent + "@reject <id>" + reset + "\n")
+	b.WriteString("    Reject one pending queue item." + "\n")
+	b.WriteString("  " + accent + "@approveAll" + reset + "\n")
+	b.WriteString("    Approve all pending queue items." + "\n")
+	b.WriteString("  " + accent + "@rejectAll" + reset + "\n")
+	b.WriteString("    Reject all pending queue items." + "\n")
 	b.WriteString("  " + accent + "@clear [history]" + reset + "\n")
-	b.WriteString("    Clear the screen, or include history to wipe saved logs." + "\n")
+	b.WriteString("    Clear the screen, or include history to remove saved chat and transfer logs." + "\n")
 	b.WriteString("  " + accent + "@help" + reset + "\n")
 	b.WriteString("    View this guide again." + "\n")
 	b.WriteString("  " + accent + "@exit" + reset + "\n")
-	b.WriteString("    Quit Bonjou." + "\n")
+	b.WriteString("    Quit Bonjou. If approvals are pending, Bonjou will warn you first." + "\n")
+	b.WriteString("  " + accent + "@exit!" + reset + "\n")
+	b.WriteString("    Force quit even if approvals are still pending." + "\n")
 
 	return strings.TrimRight(b.String(), "\n")
 }

@@ -6,7 +6,6 @@ import (
 	"math"
 	"os"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +41,14 @@ var (
 
 var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]`)
 
+var welcomeBanner = []string{
+	` ____   ___  _   _       _  ___  _   _ `,
+	`| __ ) / _ \| \ | |     | |/ _ \| | | |`,
+	`|  _ \| | | |  \| |  _  | | | | | | | |`,
+	`| |_) | |_| | |\  | | |_| | |_| | |_| |`,
+	`|____/ \___/|_| \_|  \___/ \___/ \___/ `,
+}
+
 // welcomeBannerV2 renders BONJOU in the larry3d figlet font.
 // The original welcomeBanner is preserved above for comparison.
 var welcomeBannerV2 = []string{
@@ -62,6 +69,7 @@ type UI struct {
 
 	printMu    sync.Mutex
 	progressMu sync.Mutex
+	homeDir    string
 
 	progressActive bool
 	progressID     string
@@ -69,14 +77,14 @@ type UI struct {
 }
 
 func New(session *session.Session, handler *commands.Handler) (*UI, error) {
-	stdinFD, ok := fdToInt(os.Stdin.Fd())
-	interactive := ok && term.IsTerminal(stdinFD)
+	interactive := term.IsTerminal(int(os.Stdin.Fd()))
 	cfg := &readline.Config{
 		Prompt:                 colorMuted + "> " + colorReset,
 		InterruptPrompt:        colorMuted + "^C" + colorReset + "\n",
 		EOFPrompt:              "",
 		HistorySearchFold:      true,
 		DisableAutoSaveHistory: true,
+		UniqueEditLine:         true,
 		Stdin:                  os.Stdin,
 		Stdout:                 os.Stdout,
 		Stderr:                 os.Stderr,
@@ -90,39 +98,28 @@ func New(session *session.Session, handler *commands.Handler) (*UI, error) {
 	if !interactive {
 		fmt.Fprintln(os.Stderr, colorMuted+"(Limited terminal detected; line editing shortcuts may be unavailable.)"+colorReset)
 	}
+	home, _ := os.UserHomeDir()
 	return &UI{
 		session: session,
 		handler: handler,
 		rl:      rl,
 		done:    make(chan struct{}),
+		homeDir: home,
 	}, nil
 }
 
 func configureReadline(cfg *readline.Config) {
 	cfg.HistoryLimit = 1024
 	cfg.FuncIsTerminal = func() bool {
-		stdinFD, ok := fdToInt(os.Stdin.Fd())
-		return ok && term.IsTerminal(stdinFD)
+		return term.IsTerminal(int(os.Stdin.Fd()))
 	}
 	cfg.FuncGetWidth = func() int {
-		stdoutFD, ok := fdToInt(os.Stdout.Fd())
-		if !ok {
-			return bannerWidth
-		}
-		width, _, err := term.GetSize(stdoutFD)
+		width, _, err := term.GetSize(int(os.Stdout.Fd()))
 		if err != nil || width <= 0 {
 			return bannerWidth
 		}
 		return width
 	}
-}
-
-func fdToInt(fd uintptr) (int, bool) {
-	parsed, err := strconv.ParseInt(strconv.FormatUint(uint64(fd), 10), 10, 64)
-	if err != nil {
-		return 0, false
-	}
-	return int(parsed), true
 }
 
 // Run starts the interactive Bonjou session.
@@ -192,12 +189,21 @@ func (u *UI) renderEvent(evt events.Event) {
 			itemKind = "Folder"
 		}
 		u.writeLine(fmt.Sprintf("%s[%s] %s received: '%s' from %s -> %s%s", colorPrimary, ts, itemKind, safe(evt.Message), safe(evt.From), evt.Path, colorReset))
+	case events.FilePending, events.FolderPending:
+		// The prompt specifies: "User1 wants to send a file... " The Message already contains the formatted string.
+		u.writeLine(fmt.Sprintf("%s[%s]%s %s", colorAccent, ts, colorReset, evt.Message))
 	case events.FileSent, events.FolderSent:
 		itemKind := "File"
 		if evt.Type == events.FolderSent {
 			itemKind = "Folder"
 		}
-		u.writeLine(fmt.Sprintf("%s[%s] %s upload completed: '%s' to %s%s", colorMuted, ts, itemKind, safe(evt.Message), safe(evt.To), colorReset))
+		title := strings.TrimSpace(evt.Title)
+		switch title {
+		case "File offer sent", "Folder offer sent":
+			u.writeLine(fmt.Sprintf("%s[%s] %s offer sent: '%s' to %s (waiting for approval)%s", colorMuted, ts, itemKind, safe(evt.Message), safe(evt.To), colorReset))
+		default:
+			u.writeLine(fmt.Sprintf("%s[%s] %s upload started: '%s' to %s%s", colorMuted, ts, itemKind, safe(evt.Message), safe(evt.To), colorReset))
+		}
 	case events.Error:
 		msg := safe(evt.Message)
 		// Avoid a redundant "ERROR: Delivery failed:" double-label by not
@@ -306,12 +312,11 @@ func (u *UI) writeLine(line string) {
 	}
 
 	u.printMu.Lock()
-	fmt.Fprintf(u.rl.Stdout(), "\r\033[K%s\n", line)
+	fmt.Fprintf(u.rl.Stderr(), "\r\033[K%s\n", line)
 	if active {
-		fmt.Fprintf(u.rl.Stdout(), "%s", progressLine)
+		fmt.Fprintf(u.rl.Stderr(), "%s", progressLine)
 	}
 	u.printMu.Unlock()
-	u.rl.Refresh()
 }
 
 func (u *UI) updateProgressLine(id, line string) {
@@ -327,9 +332,8 @@ func (u *UI) updateProgressLine(id, line string) {
 	}
 
 	u.printMu.Lock()
-	fmt.Fprintf(u.rl.Stdout(), "\r\033[J%s", line)
+	fmt.Fprintf(u.rl.Stderr(), "\r\033[J%s", line)
 	u.printMu.Unlock()
-	u.rl.Refresh()
 }
 
 func (u *UI) finishProgressLine(id, line string) {
@@ -354,9 +358,8 @@ func (u *UI) finishProgressLine(id, line string) {
 		fmt.Printf("\r\033[J%s\n", line)
 	} else {
 		u.printMu.Lock()
-		fmt.Fprintf(u.rl.Stdout(), "\r\033[J%s\n", line)
+		fmt.Fprintf(u.rl.Stderr(), "\r\033[J%s\n", line)
 		u.printMu.Unlock()
-		u.rl.Refresh()
 	}
 
 	if resume {
@@ -415,11 +418,11 @@ func (u *UI) formatProgressLine(ps *events.ProgressState, percent float64, done 
 			elapsedLabel = formatDuration(now.Sub(ps.StartedAt))
 		}
 		metrics := fmt.Sprintf("%s100%%%s • %sTime%s %s",
-			colorSuccess, colorReset,
+			colorPrimary, colorReset,
 			colorMuted, colorReset,
 			elapsedLabel,
 		)
-		summary := fmt.Sprintf("%s✓%s %s %s", colorSuccess, colorReset, progressCompletedVerb(ps.Direction), target)
+		summary := fmt.Sprintf("%s⇡%s %s %s", colorPrimary, colorReset, progressCompletedVerb(ps.Direction), target)
 		if peer != "" {
 			summary += " " + peer
 		}
@@ -439,6 +442,20 @@ func (u *UI) formatProgressLine(ps *events.ProgressState, percent float64, done 
 		summary += " " + peer
 	}
 	return composeProgressLine(summary, metrics, percent, barWidth, maxWidth)
+}
+
+func (u *UI) colorizePath(path string) string {
+	clean := path
+	if u.homeDir != "" && strings.HasPrefix(path, u.homeDir) {
+		suffix := strings.TrimPrefix(path, u.homeDir)
+		suffix = strings.TrimPrefix(suffix, string(os.PathSeparator))
+		if suffix == "" {
+			clean = "~"
+		} else {
+			clean = "~" + string(os.PathSeparator) + suffix
+		}
+	}
+	return colorPrimary + clean + colorReset
 }
 
 func (u *UI) progressTarget(ps *events.ProgressState, limit int) string {
@@ -506,7 +523,7 @@ func progressCompletedVerb(direction string) string {
 	if strings.EqualFold(direction, "receive") {
 		return "Received"
 	}
-	return "Sent"
+	return "Uploaded"
 }
 
 func buildGradientBar(percent float64, width int) string {
@@ -592,11 +609,7 @@ func humanBytes(n int64) string {
 }
 
 func (u *UI) terminalWidth() int {
-	stdoutFD, ok := fdToInt(os.Stdout.Fd())
-	if !ok {
-		return bannerWidth
-	}
-	width, _, err := term.GetSize(stdoutFD)
+	width, _, err := term.GetSize(int(os.Stdout.Fd()))
 	if err == nil && width > 0 {
 		return width
 	}

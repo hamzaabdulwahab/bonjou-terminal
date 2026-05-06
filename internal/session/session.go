@@ -8,6 +8,7 @@ import (
 	"github.com/hamzawahab/bonjou-cli/internal/history"
 	"github.com/hamzawahab/bonjou-cli/internal/logger"
 	"github.com/hamzawahab/bonjou-cli/internal/network"
+	"github.com/hamzawahab/bonjou-cli/internal/queue"
 )
 
 // Session wires together Bonjou runtime services.
@@ -18,12 +19,13 @@ type Session struct {
 	Discovery *network.DiscoveryService
 	Transfer  *network.TransferService
 	Events    chan events.Event
+	Queue     *queue.Manager
 
 	mu      sync.RWMutex
 	localIP string
 }
 
-func New(cfg *config.Config, log *logger.Logger, hist *history.Manager, disc *network.DiscoveryService, transfer *network.TransferService, events chan events.Event, ip string) *Session {
+func New(cfg *config.Config, log *logger.Logger, hist *history.Manager, disc *network.DiscoveryService, transfer *network.TransferService, events chan events.Event, ip string, queueMgr *queue.Manager) *Session {
 	return &Session{
 		Config:    cfg,
 		Logger:    log,
@@ -31,6 +33,7 @@ func New(cfg *config.Config, log *logger.Logger, hist *history.Manager, disc *ne
 		Discovery: disc,
 		Transfer:  transfer,
 		Events:    events,
+		Queue:     queueMgr,
 		localIP:   ip,
 	}
 }
@@ -42,6 +45,9 @@ func (s *Session) Close() {
 	}
 	if s.Discovery != nil {
 		s.Discovery.Stop()
+	}
+	if s.Queue != nil {
+		_ = s.Queue.Close()
 	}
 	if s.Logger != nil {
 		_ = s.Logger.Close()

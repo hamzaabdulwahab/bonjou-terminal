@@ -3,10 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"runtime"
-	"syscall"
 	"time"
 
 	"github.com/hamzawahab/bonjou-cli/internal/commands"
@@ -15,6 +13,7 @@ import (
 	"github.com/hamzawahab/bonjou-cli/internal/history"
 	"github.com/hamzawahab/bonjou-cli/internal/logger"
 	"github.com/hamzawahab/bonjou-cli/internal/network"
+	"github.com/hamzawahab/bonjou-cli/internal/queue"
 	"github.com/hamzawahab/bonjou-cli/internal/session"
 	"github.com/hamzawahab/bonjou-cli/internal/ui"
 	"github.com/hamzawahab/bonjou-cli/internal/version"
@@ -58,8 +57,13 @@ func main() {
 	}
 
 	discovery := network.NewDiscoveryService(cfg, log)
+	queueMgr, err := queue.NewManager(cfg.BaseDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to initialise approval queue: %v\n", err)
+		os.Exit(1)
+	}
 
-	transfer := network.NewTransferService(cfg, log, hist, eventStream, discovery)
+	transfer := network.NewTransferService(cfg, log, hist, eventStream, discovery, queueMgr)
 	if err := transfer.Start(cfg.Username, ip); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to start transfer service: %v\n", err)
 		os.Exit(1)
@@ -70,7 +74,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	sess := session.New(cfg, log, hist, discovery, transfer, eventStream, ip)
+	sess := session.New(cfg, log, hist, discovery, transfer, eventStream, ip, queueMgr)
 	stopWatcher := sess.StartNetworkWatcher(5 * time.Second)
 	handler := commands.New(sess)
 	console, err := ui.New(sess, handler)
@@ -81,13 +85,18 @@ func main() {
 	}
 
 	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	notifySignals(sigs)
 	go func() {
-		<-sigs
-		fmt.Println("\nSignal received, shutting down...")
-		stopWatcher()
-		sess.Close()
-		os.Exit(0)
+		for range sigs {
+			if sess.Transfer != nil && sess.Transfer.CancelActiveOperation() {
+				fmt.Fprintln(os.Stderr, "\nInterrupted active transfer work. Press Ctrl+C again to exit Bonjou.")
+				continue
+			}
+			fmt.Fprintln(os.Stderr, "\nSignal received, shutting down...")
+			stopWatcher()
+			sess.Close()
+			os.Exit(0)
+		}
 	}()
 
 	console.Run()
