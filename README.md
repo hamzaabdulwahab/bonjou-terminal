@@ -146,14 +146,14 @@ scoop install https://raw.githubusercontent.com/hamzaabdulwahab/scoop-bonjou/mai
 
 **AMD64 (Most PCs):**
 ```bash
-wget https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v1.1.0/bonjou_1.1.0_amd64.deb
-sudo dpkg -i bonjou_1.1.0_amd64.deb
+wget https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v1.2.0/bonjou_1.2.0_amd64.deb
+sudo dpkg -i bonjou_1.2.0_amd64.deb
 ```
 
 **ARM64 (Raspberry Pi / Mac VMs):**
 ```bash
-wget https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v1.1.0/bonjou_1.1.0_arm64.deb
-sudo dpkg -i bonjou_1.1.0_arm64.deb
+wget https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v1.2.0/bonjou_1.2.0_arm64.deb
+sudo dpkg -i bonjou_1.2.0_arm64.deb
 ```
 </details>
 

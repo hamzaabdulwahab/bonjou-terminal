@@ -50,7 +50,7 @@ brew update && brew upgrade bonjou
 
 1. Download from releases:
 ```bash
-curl -L -o bonjou https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v1.1.0/bonjou-macos
+curl -L -o bonjou https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v1.2.0/bonjou-macos
 ```
 
 2. Install:
@@ -96,14 +96,14 @@ makepkg -si
 
 **Intel/AMD (most PCs):**
 ```bash
-wget https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v1.1.0/bonjou_1.1.0_amd64.deb
-sudo dpkg -i bonjou_1.1.0_amd64.deb
+wget https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v1.2.0/bonjou_1.2.0_amd64.deb
+sudo dpkg -i bonjou_1.2.0_amd64.deb
 ```
 
 **ARM64 (Mac with Docker/Parallels, Raspberry Pi):**
 ```bash
-wget https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v1.1.0/bonjou_1.1.0_arm64.deb
-sudo dpkg -i bonjou_1.1.0_arm64.deb
+wget https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v1.2.0/bonjou_1.2.0_arm64.deb
+sudo dpkg -i bonjou_1.2.0_arm64.deb
 ```
 
 If you get dependency errors:
@@ -120,14 +120,14 @@ bonjou
 
 **Intel/AMD:**
 ```bash
-curl -L -o bonjou https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v1.1.0/bonjou-linux-amd64
+curl -L -o bonjou https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v1.2.0/bonjou-linux-amd64
 sudo mv bonjou /usr/local/bin/bonjou
 sudo chmod +x /usr/local/bin/bonjou
 ```
 
 **ARM64:**
 ```bash
-curl -L -o bonjou https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v1.1.0/bonjou-linux-arm64
+curl -L -o bonjou https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v1.2.0/bonjou-linux-arm64
 sudo mv bonjou /usr/local/bin/bonjou
 sudo chmod +x /usr/local/bin/bonjou
 ```
@@ -233,7 +233,7 @@ scoop install bonjou
 
 1. Download from releases:
 ```powershell
-Invoke-WebRequest -Uri https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v1.1.0/bonjou.exe -OutFile bonjou.exe
+Invoke-WebRequest -Uri https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v1.2.0/bonjou.exe -OutFile bonjou.exe
 ```
 
 2. Move it to a stable folder:
@@ -269,7 +269,7 @@ Move bonjou.exe to a folder in your PATH.
 bonjou --version
 ```
 
-Should show: `1.1.0`
+Should show: `1.2.0`
 
 ---
 

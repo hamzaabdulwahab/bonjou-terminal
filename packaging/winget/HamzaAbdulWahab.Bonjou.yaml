@@ -1,5 +1,5 @@
 PackageIdentifier: HamzaAbdulWahab.Bonjou
-PackageVersion: 1.1.0
+PackageVersion: 1.2.0
 DefaultLocale: en-US
 ManifestType: singleton
 ManifestVersion: 1.6.0
@@ -30,8 +30,8 @@ Icons:
 Installers:
   - Architecture: x64
     InstallerType: portable
-    InstallerUrl: https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v1.1.0/bonjou.exe
-    InstallerSha256: c3c6dd5fabf8f03128a92289547a3e8e4b74c46254497052f26349d0106210b6
+    InstallerUrl: https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v1.2.0/bonjou.exe
+    InstallerSha256: 1891c8063916432cc8fb79901d086ab7e94931cbe9d356a2113f2323bb5221ff
     Commands:
       - bonjou
     PortableCommandAlias: bonjou

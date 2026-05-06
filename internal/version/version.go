@@ -1,4 +1,4 @@
 package version
 
 // Version exposes the Bonjou application version.
-const Version = "1.1.0"
+const Version = "1.2.0"
