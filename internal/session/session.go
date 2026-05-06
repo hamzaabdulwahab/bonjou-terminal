@@ -40,14 +40,14 @@ func New(cfg *config.Config, log *logger.Logger, hist *history.Manager, disc *ne
 
 // Close releases resources associated with the session.
 func (s *Session) Close() {
-	if s.Queue != nil {
-		s.Queue.Flush()
-	}
 	if s.Transfer != nil {
 		s.Transfer.Stop()
 	}
 	if s.Discovery != nil {
 		s.Discovery.Stop()
+	}
+	if s.Queue != nil {
+		_ = s.Queue.Close()
 	}
 	if s.Logger != nil {
 		_ = s.Logger.Close()

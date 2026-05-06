@@ -18,8 +18,8 @@ iwr https://raw.githubusercontent.com/hamzaabdulwahab/bonjou-cli/main/scripts/in
 
 What this does:
 - Uses Homebrew on macOS if available
-- Uses WinGet on Windows if available (pre-installed on Windows 10/11)
-- Falls back to Scoop on Windows if WinGet is not available
+- Uses WinGet on Windows if available
+- Falls back to Scoop on Windows if WinGet is not available or the package is not yet available there
 - Falls back to direct binary install when no package manager is found
 
 ## Mac
@@ -189,12 +189,13 @@ scoop install bonjou
 
 1. Download from releases:
 ```powershell
-Invoke-WebRequest -Uri https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v1.1.0/bonjou-windows.zip -OutFile bonjou-windows.zip
+Invoke-WebRequest -Uri https://github.com/hamzaabdulwahab/bonjou-cli/releases/download/v1.1.0/bonjou.exe -OutFile bonjou.exe
 ```
 
-2. Extract:
+2. Move it to a stable folder:
 ```powershell
-Expand-Archive bonjou-windows.zip -DestinationPath C:\Tools\Bonjou
+New-Item -ItemType Directory -Force -Path C:\Tools\Bonjou | Out-Null
+Move-Item .\bonjou.exe C:\Tools\Bonjou\bonjou.exe -Force
 ```
 
 3. Add to PATH:
@@ -224,7 +225,7 @@ Move bonjou.exe to a folder in your PATH.
 bonjou --version
 ```
 
-Should show: `Bonjou v1.1.0`
+Should show: `1.1.0`
 
 ---
 
@@ -233,13 +234,14 @@ Should show: `Bonjou v1.1.0`
 If you dont have internet on the target machine:
 
 1. Download the right file on another computer:
-   - Mac: `bonjou-macos.tar.gz`
-   - Linux: `bonjou-linux.tar.gz`
-   - Windows: `bonjou-windows.zip`
+   - Mac: `bonjou-macos`
+   - Linux (Intel/AMD): `bonjou-linux-amd64`
+   - Linux (ARM64): `bonjou-linux-arm64`
+   - Windows: `bonjou.exe`
 
-2. Copy to USB or use AirDrop
+2. Copy it to the target machine by USB, AirDrop, or any other offline method
 
-3. Follow the manual install steps above
+3. Follow the matching manual install steps above
 
 ---
 

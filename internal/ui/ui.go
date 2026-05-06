@@ -84,6 +84,7 @@ func New(session *session.Session, handler *commands.Handler) (*UI, error) {
 		EOFPrompt:              "",
 		HistorySearchFold:      true,
 		DisableAutoSaveHistory: true,
+		UniqueEditLine:         true,
 		Stdin:                  os.Stdin,
 		Stdout:                 os.Stdout,
 		Stderr:                 os.Stderr,
@@ -196,7 +197,13 @@ func (u *UI) renderEvent(evt events.Event) {
 		if evt.Type == events.FolderSent {
 			itemKind = "Folder"
 		}
-		u.writeLine(fmt.Sprintf("%s[%s] %s sent: '%s' to %s (waiting for delivery confirmation)%s", colorMuted, ts, itemKind, safe(evt.Message), safe(evt.To), colorReset))
+		title := strings.TrimSpace(evt.Title)
+		switch title {
+		case "File offer sent", "Folder offer sent":
+			u.writeLine(fmt.Sprintf("%s[%s] %s offer sent: '%s' to %s (waiting for approval)%s", colorMuted, ts, itemKind, safe(evt.Message), safe(evt.To), colorReset))
+		default:
+			u.writeLine(fmt.Sprintf("%s[%s] %s upload started: '%s' to %s%s", colorMuted, ts, itemKind, safe(evt.Message), safe(evt.To), colorReset))
+		}
 	case events.Error:
 		msg := safe(evt.Message)
 		// Avoid a redundant "ERROR: Delivery failed:" double-label by not
@@ -305,12 +312,11 @@ func (u *UI) writeLine(line string) {
 	}
 
 	u.printMu.Lock()
-	fmt.Fprintf(u.rl.Stdout(), "\r\033[K%s\n", line)
+	fmt.Fprintf(u.rl.Stderr(), "\r\033[K%s\n", line)
 	if active {
-		fmt.Fprintf(u.rl.Stdout(), "%s", progressLine)
+		fmt.Fprintf(u.rl.Stderr(), "%s", progressLine)
 	}
 	u.printMu.Unlock()
-	u.rl.Refresh()
 }
 
 func (u *UI) updateProgressLine(id, line string) {
@@ -326,9 +332,8 @@ func (u *UI) updateProgressLine(id, line string) {
 	}
 
 	u.printMu.Lock()
-	fmt.Fprintf(u.rl.Stdout(), "\r\033[J%s", line)
+	fmt.Fprintf(u.rl.Stderr(), "\r\033[J%s", line)
 	u.printMu.Unlock()
-	u.rl.Refresh()
 }
 
 func (u *UI) finishProgressLine(id, line string) {
@@ -353,9 +358,8 @@ func (u *UI) finishProgressLine(id, line string) {
 		fmt.Printf("\r\033[J%s\n", line)
 	} else {
 		u.printMu.Lock()
-		fmt.Fprintf(u.rl.Stdout(), "\r\033[J%s\n", line)
+		fmt.Fprintf(u.rl.Stderr(), "\r\033[J%s\n", line)
 		u.printMu.Unlock()
-		u.rl.Refresh()
 	}
 
 	if resume {
@@ -414,11 +418,11 @@ func (u *UI) formatProgressLine(ps *events.ProgressState, percent float64, done 
 			elapsedLabel = formatDuration(now.Sub(ps.StartedAt))
 		}
 		metrics := fmt.Sprintf("%s100%%%s • %sTime%s %s",
-			colorSuccess, colorReset,
+			colorPrimary, colorReset,
 			colorMuted, colorReset,
 			elapsedLabel,
 		)
-		summary := fmt.Sprintf("%s✓%s %s %s", colorSuccess, colorReset, progressCompletedVerb(ps.Direction), target)
+		summary := fmt.Sprintf("%s⇡%s %s %s", colorPrimary, colorReset, progressCompletedVerb(ps.Direction), target)
 		if peer != "" {
 			summary += " " + peer
 		}
@@ -519,7 +523,7 @@ func progressCompletedVerb(direction string) string {
 	if strings.EqualFold(direction, "receive") {
 		return "Received"
 	}
-	return "Sent"
+	return "Uploaded"
 }
 
 func buildGradientBar(percent float64, width int) string {

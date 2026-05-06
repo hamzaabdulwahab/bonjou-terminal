@@ -44,6 +44,9 @@ func (m *Manager) transferLogPath() string {
 }
 
 func (m *Manager) AppendChat(from, to, message string) error {
+	message = strings.ReplaceAll(message, "\r\n", "\n")
+	message = strings.ReplaceAll(message, "\r", "\n")
+	message = strconv.Quote(message)
 	entry := time.Now().Format(time.RFC3339) + " | chat | " + from + " -> " + to + " | " + message + "\n"
 	return m.append(m.chatLogPath(), entry)
 }
@@ -125,6 +128,8 @@ func readLines(path string) ([]string, error) {
 	defer file.Close()
 	var lines []string
 	scanner := bufio.NewScanner(file)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
 	for scanner.Scan() {
 		lines = append(lines, scanner.Text())
 	}
@@ -141,13 +146,17 @@ func parseChatEntry(line string) (Entry, error) {
 		return Entry{}, err
 	}
 	from, to := parseEndpoints(parts[2])
+	message := parts[3]
+	if unquoted, err := strconv.Unquote(message); err == nil {
+		message = unquoted
+	}
 	return Entry{
 		Timestamp: ts,
 		Category:  "chat",
 		Kind:      "message",
 		From:      from,
 		To:        to,
-		Message:   parts[3],
+		Message:   message,
 	}, nil
 }
 

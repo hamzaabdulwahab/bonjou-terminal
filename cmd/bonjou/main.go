@@ -3,10 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"runtime"
-	"syscall"
 	"time"
 
 	"github.com/hamzawahab/bonjou-cli/internal/commands"
@@ -59,7 +57,11 @@ func main() {
 	}
 
 	discovery := network.NewDiscoveryService(cfg, log)
-	queueMgr := queue.NewManager()
+	queueMgr, err := queue.NewManager(cfg.BaseDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to initialise approval queue: %v\n", err)
+		os.Exit(1)
+	}
 
 	transfer := network.NewTransferService(cfg, log, hist, eventStream, discovery, queueMgr)
 	if err := transfer.Start(cfg.Username, ip); err != nil {
@@ -83,13 +85,18 @@ func main() {
 	}
 
 	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	notifySignals(sigs)
 	go func() {
-		<-sigs
-		fmt.Println("\nSignal received, shutting down...")
-		stopWatcher()
-		sess.Close()
-		os.Exit(0)
+		for range sigs {
+			if sess.Transfer != nil && sess.Transfer.CancelActiveOperation() {
+				fmt.Fprintln(os.Stderr, "\nInterrupted active transfer work. Press Ctrl+C again to exit Bonjou.")
+				continue
+			}
+			fmt.Fprintln(os.Stderr, "\nSignal received, shutting down...")
+			stopWatcher()
+			sess.Close()
+			os.Exit(0)
+		}
 	}()
 
 	console.Run()

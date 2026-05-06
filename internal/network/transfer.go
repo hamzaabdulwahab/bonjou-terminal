@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/ecdh"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -17,6 +18,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -29,31 +31,44 @@ import (
 )
 
 const (
-	kindMessage = "message"
-	kindFile    = "file"
-	kindFolder  = "folder"
-	kindAck     = "ack"
-	ackTimeout  = 12 * time.Second
+	kindMessage       = "message"
+	kindFileOffer     = "file_offer"
+	kindFolderOffer   = "folder_offer"
+	kindFileRequest   = "file_request"
+	kindFolderRequest = "folder_request"
+	kindFileReject    = "file_reject"
+	kindFolderReject  = "folder_reject"
+	kindFile          = "file"
+	kindFolder        = "folder"
+	kindAck           = "ack"
+	ackTimeout        = 12 * time.Second
 )
 
-var errServiceStopping = errors.New("transfer service stopping")
+var (
+	errServiceStopping  = errors.New("transfer service stopping")
+	errApprovalMissing  = errors.New("transfer approval request not found")
+	errTransferRejected = errors.New("transfer was rejected by receiver")
+)
 
 type envelope struct {
-	Kind      string `json:"kind"`
-	From      string `json:"from"`
-	FromIP    string `json:"from_ip"`
-	To        string `json:"to"`
-	Name      string `json:"name"`
-	Size      int64  `json:"size"`
-	Timestamp int64  `json:"ts"`
-	Message   string `json:"message"`
-	Checksum  string `json:"checksum"`
-	HMAC      string `json:"hmac"`
-	Encrypted bool   `json:"encrypted,omitempty"`
-	Nonce     string `json:"nonce,omitempty"`
-	Encoding  string `json:"encoding,omitempty"`
-	AckKind   string `json:"ack_kind,omitempty"`
-	AckStatus string `json:"ack_status,omitempty"`
+	Kind       string `json:"kind"`
+	From       string `json:"from"`
+	FromIP     string `json:"from_ip"`
+	To         string `json:"to"`
+	Name       string `json:"name"`
+	Size       int64  `json:"size"`
+	ActualSize int64  `json:"actual_size,omitempty"`
+	Timestamp  int64  `json:"ts"`
+	Message    string `json:"message"`
+	Checksum   string `json:"checksum"`
+	HMAC       string `json:"hmac"`
+	Encrypted  bool   `json:"encrypted,omitempty"`
+	Nonce      string `json:"nonce,omitempty"`
+	Encoding   string `json:"encoding,omitempty"`
+	AckKind    string `json:"ack_kind,omitempty"`
+	AckStatus  string `json:"ack_status,omitempty"`
+	RequestID  string `json:"request_id,omitempty"`
+	TargetPath string `json:"target_path,omitempty"`
 }
 
 type sealedEnvelope struct {
@@ -70,6 +85,16 @@ type progressContext struct {
 	peer      string
 	direction string
 	kind      string
+}
+
+type outgoingApproval struct {
+	Kind       string    `json:"kind"`
+	Name       string    `json:"name"`
+	Path       string    `json:"path"`
+	Size       int64     `json:"size"`
+	ActualSize int64     `json:"actual_size"`
+	Checksum   string    `json:"checksum"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 type writeDeadlineSetter interface {
@@ -97,8 +122,16 @@ type TransferService struct {
 	localMu      sync.RWMutex
 	chunkSize    int
 	chunkTimeout time.Duration
+
 	pendingAckMu sync.Mutex
 	pendingAcks  map[string]chan *envelope
+
+	outgoingMu           sync.Mutex
+	outgoingApprovals    map[string]*outgoingApproval
+	outgoingSnapshotPath string
+
+	cancelMu     sync.Mutex
+	cancelActive chan struct{}
 }
 
 func (t *TransferService) isStopping() bool {
@@ -111,25 +144,28 @@ func (t *TransferService) isStopping() bool {
 }
 
 func NewTransferService(cfg *config.Config, logger *logger.Logger, history *history.Manager, events chan<- events.Event, discovery *DiscoveryService, queueMgr *queue.Manager) *TransferService {
-	return &TransferService{
-		cfg:          cfg,
-		logger:       logger,
-		history:      history,
-		events:       events,
-		discovery:    discovery,
-		queue:        queueMgr,
-		stop:         make(chan struct{}),
-		chunkSize:    cfg.ChunkSizeBytes(),
-		chunkTimeout: cfg.ChunkTimeout(),
-		pendingAcks:  make(map[string]chan *envelope),
+	t := &TransferService{
+		cfg:                  cfg,
+		logger:               logger,
+		history:              history,
+		events:               events,
+		discovery:            discovery,
+		queue:                queueMgr,
+		stop:                 make(chan struct{}),
+		chunkSize:            cfg.ChunkSizeBytes(),
+		chunkTimeout:         cfg.ChunkTimeout(),
+		pendingAcks:          make(map[string]chan *envelope),
+		outgoingApprovals:    make(map[string]*outgoingApproval),
+		outgoingSnapshotPath: filepath.Join(cfg.BaseDir, "pending", "outgoing.json"),
 	}
+	t.loadOutgoingApprovals()
+	return t
 }
 
 func (t *TransferService) Start(username, ip string) error {
 	addr := fmt.Sprintf(":%d", t.cfg.ListenPort)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		// Provide helpful error message for port conflicts
 		if strings.Contains(err.Error(), "address already in use") {
 			return fmt.Errorf("port %d is already in use - another Bonjou instance or application may be running. Error: %v", t.cfg.ListenPort, err)
 		}
@@ -152,7 +188,7 @@ func (t *TransferService) Stop() {
 	t.stopOnce.Do(func() {
 		close(t.stop)
 		if t.listener != nil {
-			t.listener.Close()
+			_ = t.listener.Close()
 		}
 	})
 	t.wait.Wait()
@@ -193,8 +229,7 @@ func (t *TransferService) handleConnection(conn net.Conn) error {
 	if err != nil {
 		return err
 	}
-	err = t.verifyEnvelope(env, key)
-	if err != nil {
+	if err := t.verifyEnvelope(env, key); err != nil {
 		t.logger.Error("verify envelope failed: %v", err)
 		t.emit(events.Event{Type: events.Error, Title: "Rejected incoming payload", Message: err.Error(), From: env.From, Timestamp: time.Now()})
 		return err
@@ -202,6 +237,7 @@ func (t *TransferService) handleConnection(conn net.Conn) error {
 	if env.Encrypted && strings.TrimSpace(env.Nonce) == "" {
 		return errors.New("encrypted payload missing nonce")
 	}
+
 	switch env.Kind {
 	case kindMessage:
 		if env.Encrypted {
@@ -215,8 +251,22 @@ func (t *TransferService) handleConnection(conn net.Conn) error {
 			}
 			env.Message = plaintext
 		}
+		env.Message = normalizeMessageLineEndings(env.Message)
 		t.emit(events.Event{Type: events.MessageReceived, Title: "Message", Message: env.Message, From: env.From, Timestamp: time.Now()})
-		_ = t.history.AppendChat(env.From, env.To, env.Message)
+		if t.history != nil {
+			_ = t.history.AppendChat(env.From, env.To, env.Message)
+		}
+		return nil
+	case kindFileOffer:
+		return t.receiveFileOffer(env)
+	case kindFolderOffer:
+		return t.receiveFolderOffer(env)
+	case kindFileRequest:
+		return t.handleFileRequest(env)
+	case kindFolderRequest:
+		return t.handleFolderRequest(env)
+	case kindFileReject, kindFolderReject:
+		return t.handleTransferRejection(env)
 	case kindFile:
 		return t.receiveFile(conn, env, key)
 	case kindFolder:
@@ -226,7 +276,6 @@ func (t *TransferService) handleConnection(conn net.Conn) error {
 	default:
 		return fmt.Errorf("unknown payload kind: %s", env.Kind)
 	}
-	return nil
 }
 
 // SendMessage delivers plain text to a peer.
@@ -235,6 +284,7 @@ func (t *TransferService) SendMessage(peer *Peer, message string) error {
 		return errServiceStopping
 	}
 	localUser, localIP := t.identity()
+	message = normalizeMessageLineEndings(message)
 	env := &envelope{
 		Kind:      kindMessage,
 		From:      localUser,
@@ -247,18 +297,24 @@ func (t *TransferService) SendMessage(peer *Peer, message string) error {
 		return err
 	}
 	t.emit(events.Event{Type: events.MessageSent, Title: "Message sent", Message: message, To: peer.Username, Timestamp: time.Now()})
-	return t.history.AppendChat(localUser, peer.Username, message)
+	if t.history != nil {
+		return t.history.AppendChat(localUser, peer.Username, message)
+	}
+	return nil
 }
 
-// SendFile streams a file to the peer.
+// SendFile sends metadata first. File bytes are transferred only after receiver approval.
 func (t *TransferService) SendFile(peer *Peer, path string) error {
 	if t.isStopping() {
 		return errServiceStopping
 	}
+	cancel, finish := t.beginCancelableOperation()
+	defer finish()
+
 	localUser, localIP := t.identity()
 	info, err := os.Stat(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("file not found: %s", filepath.Base(path))
 		}
 		return fmt.Errorf("cannot access file: %v", err)
@@ -266,54 +322,67 @@ func (t *TransferService) SendFile(peer *Peer, path string) error {
 	if info.IsDir() {
 		return errors.New("path is a directory — use @folder to send a folder")
 	}
-	// Open the file once to atomically derive its size, checksum, and the
-	// byte stream that will be sent.  This prevents the race where the
-	// file could be modified between a separate stat/checksum call and
-	// the subsequent stream, which would cause a checksum mismatch on the
-	// receiver side even though the send itself looked successful.
+	if err := t.checkCanceled(cancel); err != nil {
+		return err
+	}
 	tf, err := openTransferFile(path)
 	if err != nil {
 		return fmt.Errorf("cannot read file for transfer: %v", err)
 	}
-	defer tf.file.Close()
-	env := &envelope{
+	_ = tf.file.Close()
+
+	requestID, err := randomHexID(16)
+	if err != nil {
+		return err
+	}
+	t.storeOutgoingApproval(requestID, &outgoingApproval{
 		Kind:      kindFile,
+		Name:      filepath.Base(path),
+		Path:      path,
+		Size:      tf.size,
+		Checksum:  tf.checksum,
+		CreatedAt: time.Now(),
+	})
+
+	env := &envelope{
+		Kind:      kindFileOffer,
 		From:      localUser,
 		FromIP:    localIP,
 		To:        peer.Username,
 		Name:      filepath.Base(path),
 		Size:      tf.size,
-		Timestamp: time.Now().Unix(),
 		Checksum:  tf.checksum,
+		RequestID: requestID,
+		Timestamp: time.Now().Unix(),
+		Message:   "waiting for receiver approval",
 	}
-	stream := func(writer io.Writer, enc cipher.Stream) error {
-		ctx := progressContext{
-			id:        fmt.Sprintf("file:%s", env.Name),
-			label:     fmt.Sprintf("Sending %s", env.Name),
-			path:      path,
-			peer:      formatPeer(peer),
-			direction: "send",
-			kind:      kindFile,
-		}
-		return t.copyWithProgress(writer, enc, tf.file, tf.size, ctx)
-	}
-	if err := t.sendEnvelope(peer, env, stream); err != nil {
-		t.emitTransferIssue(kindFile, env.Name, peer.Username, path, err)
+	if err := t.sendEnvelope(peer, env, nil); err != nil {
+		t.deleteOutgoingApproval(requestID)
 		return err
 	}
-	t.emit(events.Event{Type: events.FileSent, Title: "File sent", Message: env.Name, To: peer.Username, Path: path, Size: env.Size, Timestamp: time.Now()})
-	return t.history.AppendTransfer(localUser, peer.Username, path, env.Size, kindFile)
+
+	t.emit(events.Event{
+		Type:      events.Status,
+		Title:     "File offer sent",
+		Message:   fmt.Sprintf("File offer sent: '%s' to %s. Waiting for approval.", filepath.Base(path), peerLabelOrIP(peer)),
+		To:        peer.Username,
+		Timestamp: time.Now(),
+	})
+	return nil
 }
 
-// SendFolder compresses and shares a folder with the peer.
+// SendFolder sends metadata first. Folder bytes are transferred only after receiver approval.
 func (t *TransferService) SendFolder(peer *Peer, dir string) error {
 	if t.isStopping() {
 		return errServiceStopping
 	}
+	cancel, finish := t.beginCancelableOperation()
+	defer finish()
+
 	localUser, localIP := t.identity()
 	info, err := os.Stat(dir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("folder not found: %s", filepath.Base(dir))
 		}
 		return fmt.Errorf("cannot access folder: %v", err)
@@ -321,46 +390,412 @@ func (t *TransferService) SendFolder(peer *Peer, dir string) error {
 	if !info.IsDir() {
 		return errors.New("path is not a directory — use @file to send a single file")
 	}
-	archivePath, err := zipDirectory(dir)
+
+	displayName := filepath.Base(dir)
+	t.emit(events.Event{
+		Type:      events.Status,
+		Title:     "Preparing folder offer",
+		Message:   fmt.Sprintf("Preparing folder '%s' for approval...", displayName),
+		To:        peer.Username,
+		Timestamp: time.Now(),
+	})
+
+	actualSize, err := directorySize(dir, cancel)
+	if err != nil {
+		return fmt.Errorf("failed to measure folder size: %v", err)
+	}
+
+	preview, err := folderPreview(dir, cancel)
+	if err != nil {
+		return fmt.Errorf("failed to build folder preview: %v", err)
+	}
+
+	archivePath, err := zipDirectory(dir, cancel)
 	if err != nil {
 		return fmt.Errorf("failed to compress folder for transfer: %v", err)
 	}
 	defer os.Remove(archivePath)
-	// Open the archive once to atomically derive its size, checksum, and
-	// the byte stream to send — same race-elimination rationale as SendFile.
+
+	tf, err := openTransferFile(archivePath)
+	if err != nil {
+		return fmt.Errorf("cannot read compressed archive for transfer: %v", err)
+	}
+	_ = tf.file.Close()
+
+	requestID, err := randomHexID(16)
+	if err != nil {
+		return err
+	}
+
+	t.storeOutgoingApproval(requestID, &outgoingApproval{
+		Kind:       kindFolder,
+		Name:       displayName,
+		Path:       dir,
+		Size:       tf.size,
+		ActualSize: actualSize,
+		Checksum:   tf.checksum,
+		CreatedAt:  time.Now(),
+	})
+
+	env := &envelope{
+		Kind:       kindFolderOffer,
+		From:       localUser,
+		FromIP:     localIP,
+		To:         peer.Username,
+		Name:       displayName,
+		Size:       actualSize,
+		ActualSize: actualSize,
+		Checksum:   tf.checksum,
+		RequestID:  requestID,
+		Timestamp:  time.Now().Unix(),
+		Message:    preview,
+	}
+	if err := t.sendEnvelope(peer, env, nil); err != nil {
+		t.deleteOutgoingApproval(requestID)
+		return err
+	}
+
+	t.emit(events.Event{
+		Type:      events.Status,
+		Title:     "Folder offer sent",
+		Message:   fmt.Sprintf("Folder offer sent: '%s' to %s. Waiting for approval.", displayName, peerLabelOrIP(peer)),
+		To:        peer.Username,
+		Timestamp: time.Now(),
+	})
+	return nil
+}
+
+func (t *TransferService) ApproveFileTransfer(f *queue.PendingFile, destPath string) error {
+	if f == nil {
+		return queue.ErrQueueItemNotFound
+	}
+	peer, err := t.resolvePeerForQueueItem(f.Sender, f.SenderIP)
+	if err != nil {
+		return err
+	}
+	localUser, localIP := t.identity()
+	env := &envelope{
+		Kind:       kindFileRequest,
+		From:       localUser,
+		FromIP:     localIP,
+		To:         peer.Username,
+		Name:       f.Name,
+		Size:       f.Size,
+		RequestID:  f.RequestID,
+		TargetPath: destPath,
+		Timestamp:  time.Now().Unix(),
+	}
+	if err := t.sendEnvelope(peer, env, nil); err != nil {
+		return err
+	}
+	t.emit(events.Event{
+		Type:      events.Status,
+		Title:     "Download requested",
+		Message:   fmt.Sprintf("Requested file '%s' from %s", f.Name, peerLabelOrIP(peer)),
+		From:      peer.Username,
+		Timestamp: time.Now(),
+	})
+	return nil
+}
+
+func (t *TransferService) ApproveFolderTransfer(f *queue.PendingFolder, destPath string) error {
+	if f == nil {
+		return queue.ErrQueueItemNotFound
+	}
+	peer, err := t.resolvePeerForQueueItem(f.Sender, f.SenderIP)
+	if err != nil {
+		return err
+	}
+	localUser, localIP := t.identity()
+	env := &envelope{
+		Kind:       kindFolderRequest,
+		From:       localUser,
+		FromIP:     localIP,
+		To:         peer.Username,
+		Name:       f.Name,
+		Size:       f.Size,
+		RequestID:  f.RequestID,
+		TargetPath: destPath,
+		Timestamp:  time.Now().Unix(),
+	}
+	if err := t.sendEnvelope(peer, env, nil); err != nil {
+		return err
+	}
+	t.emit(events.Event{
+		Type:      events.Status,
+		Title:     "Download requested",
+		Message:   fmt.Sprintf("Requested folder '%s' from %s", f.Name, peerLabelOrIP(peer)),
+		From:      peer.Username,
+		Timestamp: time.Now(),
+	})
+	return nil
+}
+
+func (t *TransferService) RejectFileTransfer(f *queue.PendingFile) error {
+	if f == nil {
+		return queue.ErrQueueItemNotFound
+	}
+	return t.sendRejection(kindFileReject, f.RequestID, f.Name, f.Sender, f.SenderIP)
+}
+
+func (t *TransferService) RejectFolderTransfer(f *queue.PendingFolder) error {
+	if f == nil {
+		return queue.ErrQueueItemNotFound
+	}
+	return t.sendRejection(kindFolderReject, f.RequestID, f.Name, f.Sender, f.SenderIP)
+}
+
+func (t *TransferService) sendRejection(kind, requestID, name, sender, senderIP string) error {
+	peer, err := t.resolvePeerForQueueItem(sender, senderIP)
+	if err != nil {
+		return err
+	}
+	localUser, localIP := t.identity()
+	env := &envelope{
+		Kind:      kind,
+		From:      localUser,
+		FromIP:    localIP,
+		To:        peer.Username,
+		Name:      name,
+		RequestID: requestID,
+		Timestamp: time.Now().Unix(),
+	}
+	if err := t.sendEnvelope(peer, env, nil); err != nil {
+		return err
+	}
+	t.emit(events.Event{
+		Type:      events.Status,
+		Title:     "Transfer rejected",
+		Message:   fmt.Sprintf("Rejected %s '%s' from %s", transferKindLabel(kind), name, peerLabelOrIP(peer)),
+		From:      peer.Username,
+		Timestamp: time.Now(),
+	})
+	return nil
+}
+
+func (t *TransferService) receiveFileOffer(env *envelope) error {
+	queueID, err := t.queue.AddFile(env.RequestID, env.From, env.FromIP, env.Name, env.Size, "")
+	if err != nil {
+		return err
+	}
+	displayMsg := fmt.Sprintf(
+		"Pending file [%d] from %s: %s (%s)\nRun @queue, @view %d, @approve %d, or @reject %d",
+		queueID,
+		env.From,
+		env.Name,
+		formatSize(env.Size),
+		queueID,
+		queueID,
+		queueID,
+	)
+	t.emit(events.Event{
+		Type:      events.FilePending,
+		Title:     "File pending approval",
+		Message:   displayMsg,
+		From:      env.From,
+		Size:      env.Size,
+		Timestamp: time.Now(),
+		Level:     "info",
+	})
+	return nil
+}
+
+func (t *TransferService) receiveFolderOffer(env *envelope) error {
+	queueID, err := t.queue.AddFolder(env.RequestID, env.From, env.FromIP, env.Name, env.Size, env.Message)
+	if err != nil {
+		return err
+	}
+	displayMsg := fmt.Sprintf(
+		"Pending folder [%d] from %s: %s (%s)\nRun @queue, @view %d, @approve %d, or @reject %d",
+		queueID,
+		env.From,
+		env.Name,
+		formatSize(env.Size),
+		queueID,
+		queueID,
+		queueID,
+	)
+	t.emit(events.Event{
+		Type:      events.FolderPending,
+		Title:     "Folder pending approval",
+		Message:   displayMsg,
+		From:      env.From,
+		Size:      env.Size,
+		Timestamp: time.Now(),
+		Level:     "info",
+	})
+	return nil
+}
+
+func (t *TransferService) handleFileRequest(env *envelope) error {
+	approval, ok := t.getOutgoingApproval(env.RequestID)
+	if !ok {
+		return errApprovalMissing
+	}
+	if !strings.EqualFold(approval.Kind, kindFile) {
+		return fmt.Errorf("approval kind mismatch for request %s", env.RequestID)
+	}
+	return t.performApprovedFileTransfer(env, approval)
+}
+
+func (t *TransferService) handleFolderRequest(env *envelope) error {
+	approval, ok := t.getOutgoingApproval(env.RequestID)
+	if !ok {
+		return errApprovalMissing
+	}
+	if !strings.EqualFold(approval.Kind, kindFolder) {
+		return fmt.Errorf("approval kind mismatch for request %s", env.RequestID)
+	}
+	return t.performApprovedFolderTransfer(env, approval)
+}
+
+func (t *TransferService) handleTransferRejection(env *envelope) error {
+	approval, ok := t.getOutgoingApproval(env.RequestID)
+	if ok {
+		t.deleteOutgoingApproval(env.RequestID)
+		t.emit(events.Event{
+			Type:      events.Status,
+			Title:     "Transfer rejected",
+			Message:   fmt.Sprintf("%s '%s' was rejected by %s", transferKindLabel(approval.Kind), approval.Name, safeRemoteLabel(env.From, env.FromIP)),
+			From:      env.From,
+			Timestamp: time.Now(),
+		})
+		return nil
+	}
+	return nil
+}
+
+func (t *TransferService) performApprovedFileTransfer(env *envelope, approval *outgoingApproval) error {
+	cancel, finish := t.beginCancelableOperation()
+	defer finish()
+
+	peer, err := t.resolvePeerForQueueItem(env.From, env.FromIP)
+	if err != nil {
+		return err
+	}
+	tf, err := openTransferFile(approval.Path)
+	if err != nil {
+		return fmt.Errorf("cannot read file for transfer: %v", err)
+	}
+	defer tf.file.Close()
+
+	localUser, localIP := t.identity()
+	sendEnv := &envelope{
+		Kind:      kindFile,
+		From:      localUser,
+		FromIP:    localIP,
+		To:        peer.Username,
+		Name:      approval.Name,
+		Size:      tf.size,
+		Checksum:  tf.checksum,
+		RequestID: env.RequestID,
+		Message:   env.TargetPath,
+		Timestamp: time.Now().Unix(),
+	}
+	stream := func(writer io.Writer, enc cipher.Stream) error {
+		ctx := progressContext{
+			id:        fmt.Sprintf("file:%s", sendEnv.Name),
+			label:     fmt.Sprintf("Sending %s", sendEnv.Name),
+			path:      approval.Path,
+			peer:      formatPeer(peer),
+			direction: "send",
+			kind:      kindFile,
+		}
+		return t.copyWithProgress(writer, enc, tf.file, tf.size, ctx, cancel)
+	}
+	t.emit(events.Event{
+		Type:      events.Status,
+		Title:     "Approval received",
+		Message:   fmt.Sprintf("%s approved file '%s'. Starting upload...", peerLabelOrIP(peer), approval.Name),
+		To:        peer.Username,
+		Timestamp: time.Now(),
+	})
+	t.emit(events.Event{
+		Type:      events.FileSent,
+		Title:     "File upload started",
+		Message:   approval.Name,
+		To:        peer.Username,
+		Timestamp: time.Now(),
+	})
+	if err := t.sendEnvelope(peer, sendEnv, stream); err != nil {
+		t.emitTransferIssue(kindFile, approval.Name, peer.Username, approval.Path, err)
+		return err
+	}
+	t.deleteOutgoingApproval(env.RequestID)
+	if t.history != nil {
+		return t.history.AppendTransfer(localUser, peer.Username, approval.Path, tf.size, kindFile)
+	}
+	return nil
+}
+
+func (t *TransferService) performApprovedFolderTransfer(env *envelope, approval *outgoingApproval) error {
+	cancel, finish := t.beginCancelableOperation()
+	defer finish()
+
+	peer, err := t.resolvePeerForQueueItem(env.From, env.FromIP)
+	if err != nil {
+		return err
+	}
+	archivePath, err := zipDirectory(approval.Path, cancel)
+	if err != nil {
+		return fmt.Errorf("failed to compress folder for transfer: %v", err)
+	}
+	defer os.Remove(archivePath)
+
 	tf, err := openTransferFile(archivePath)
 	if err != nil {
 		return fmt.Errorf("cannot read compressed archive for transfer: %v", err)
 	}
 	defer tf.file.Close()
-	displayName := filepath.Base(dir)
-	env := &envelope{
-		Kind:      kindFolder,
-		From:      localUser,
-		FromIP:    localIP,
-		To:        peer.Username,
-		Name:      displayName + ".zip",
-		Size:      tf.size,
-		Timestamp: time.Now().Unix(),
-		Checksum:  tf.checksum,
+
+	localUser, localIP := t.identity()
+	sendEnv := &envelope{
+		Kind:       kindFolder,
+		From:       localUser,
+		FromIP:     localIP,
+		To:         peer.Username,
+		Name:       approval.Name + ".zip",
+		Size:       tf.size,
+		ActualSize: approval.ActualSize,
+		Checksum:   tf.checksum,
+		RequestID:  env.RequestID,
+		Message:    env.TargetPath,
+		Timestamp:  time.Now().Unix(),
 	}
 	stream := func(writer io.Writer, enc cipher.Stream) error {
 		ctx := progressContext{
-			id:        fmt.Sprintf("folder:%s", displayName),
-			label:     fmt.Sprintf("Sending %s", displayName),
-			path:      dir,
+			id:        fmt.Sprintf("folder:%s", approval.Name),
+			label:     fmt.Sprintf("Sending %s", approval.Name),
+			path:      approval.Path,
 			peer:      formatPeer(peer),
 			direction: "send",
 			kind:      kindFolder,
 		}
-		return t.copyWithProgress(writer, enc, tf.file, tf.size, ctx)
+		return t.copyWithProgress(writer, enc, tf.file, tf.size, ctx, cancel)
 	}
-	if err := t.sendEnvelope(peer, env, stream); err != nil {
-		t.emitTransferIssue(kindFolder, displayName, peer.Username, dir, err)
+	t.emit(events.Event{
+		Type:      events.Status,
+		Title:     "Approval received",
+		Message:   fmt.Sprintf("%s approved folder '%s'. Starting upload...", peerLabelOrIP(peer), approval.Name),
+		To:        peer.Username,
+		Timestamp: time.Now(),
+	})
+	t.emit(events.Event{
+		Type:      events.FolderSent,
+		Title:     "Folder upload started",
+		Message:   approval.Name,
+		To:        peer.Username,
+		Timestamp: time.Now(),
+	})
+	if err := t.sendEnvelope(peer, sendEnv, stream); err != nil {
+		t.emitTransferIssue(kindFolder, approval.Name, peer.Username, approval.Path, err)
 		return err
 	}
-	t.emit(events.Event{Type: events.FolderSent, Title: "Folder sent", Message: displayName, To: peer.Username, Path: dir, Size: env.Size, Timestamp: time.Now()})
-	return t.history.AppendTransfer(localUser, peer.Username, dir, env.Size, kindFolder)
+	t.deleteOutgoingApproval(env.RequestID)
+	if t.history != nil {
+		return t.history.AppendTransfer(localUser, peer.Username, approval.Path, tf.size, kindFolder)
+	}
+	return nil
 }
 
 func (t *TransferService) sendEnvelope(peer *Peer, env *envelope, writer func(io.Writer, cipher.Stream) error) error {
@@ -396,12 +831,14 @@ func (t *TransferService) sendEnvelope(peer *Peer, env *envelope, writer func(io
 		}
 	}
 	env.HMAC = t.signEnvelope(env, shared)
+
 	address := net.JoinHostPort(peer.IP, fmt.Sprintf("%d", peer.Port))
 	conn, err := net.DialTimeout("tcp", address, 5*time.Second)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
+
 	sealed, err := sealEnvelope(env, shared)
 	if err != nil {
 		return err
@@ -409,40 +846,44 @@ func (t *TransferService) sendEnvelope(peer *Peer, env *envelope, writer func(io
 	if err := writeEnvelope(conn, sealed); err != nil {
 		return err
 	}
-	if writer != nil {
-		if t.isStopping() {
-			return errServiceStopping
-		}
-		var ackKey string
-		var ackCh chan *envelope
-		if env.Kind == kindFile || env.Kind == kindFolder {
-			ackKey = deliveryAckKey(env.Kind, transferDisplayName(env.Kind, env.Name), peerLabelOrIP(peer))
-			ackCh = t.registerPendingAck(ackKey)
-			defer t.unregisterPendingAck(ackKey)
-		}
-		var stream cipher.Stream
-		if env.Encrypted {
-			s, err := newCipherStream(shared, nonceBytes)
-			if err != nil {
-				return err
-			}
-			stream = s
-		}
-		if err := writer(conn, stream); err != nil {
+
+	if writer == nil {
+		return nil
+	}
+	if t.isStopping() {
+		return errServiceStopping
+	}
+
+	var ackKey string
+	var ackCh chan *envelope
+	if env.Kind == kindFile || env.Kind == kindFolder {
+		ackKey = deliveryAckKey(env.Kind, transferDisplayName(env.Kind, env.Name), peerLabelOrIP(peer))
+		ackCh = t.registerPendingAck(ackKey)
+		defer t.unregisterPendingAck(ackKey)
+	}
+
+	var stream cipher.Stream
+	if env.Encrypted {
+		s, err := newCipherStream(shared, nonceBytes)
+		if err != nil {
 			return err
 		}
-		if env.Kind == kindFile || env.Kind == kindFolder {
-			if err := t.awaitInlineDeliveryAck(conn, shared, env); err != nil {
-				if ackCh != nil {
-					if ack := t.waitPendingAck(ackCh, 2*time.Second); ack != nil {
-						if strings.EqualFold(ack.AckStatus, "ok") {
-							return nil
-						}
-						return fmt.Errorf("Delivery failed: %s '%s' to %s", transferKindLabel(env.Kind), transferDisplayName(env.Kind, env.Name), peerLabelOrIP(peer))
+		stream = s
+	}
+	if err := writer(conn, stream); err != nil {
+		return err
+	}
+	if env.Kind == kindFile || env.Kind == kindFolder {
+		if err := t.awaitInlineDeliveryAck(conn, shared, env); err != nil {
+			if ackCh != nil {
+				if ack := t.waitPendingAck(ackCh, 2*time.Second); ack != nil {
+					if strings.EqualFold(ack.AckStatus, "ok") {
+						return nil
 					}
+					return fmt.Errorf("Delivery failed: %s '%s' to %s", transferKindLabel(env.Kind), transferDisplayName(env.Kind, env.Name), peerLabelOrIP(peer))
 				}
-				return err
 			}
+			return err
 		}
 	}
 	return nil
@@ -454,12 +895,17 @@ func (t *TransferService) signEnvelope(env *envelope, key []byte) string {
 	mac.Write([]byte(env.From))
 	mac.Write([]byte(env.FromIP))
 	mac.Write([]byte(env.To))
-	mac.Write([]byte(env.Message))
 	mac.Write([]byte(env.Name))
+	mac.Write([]byte(env.Message))
 	mac.Write([]byte(env.Checksum))
+	mac.Write([]byte(env.RequestID))
+	mac.Write([]byte(env.TargetPath))
 	sizeBuf := make([]byte, 8)
 	binary.BigEndian.PutUint64(sizeBuf, uint64(env.Size))
 	mac.Write(sizeBuf)
+	actualSizeBuf := make([]byte, 8)
+	binary.BigEndian.PutUint64(actualSizeBuf, uint64(env.ActualSize))
+	mac.Write(actualSizeBuf)
 	tsBuf := make([]byte, 8)
 	binary.BigEndian.PutUint64(tsBuf, uint64(env.Timestamp))
 	mac.Write(tsBuf)
@@ -500,25 +946,18 @@ func (t *TransferService) receiveFile(conn net.Conn, env *envelope, key []byte) 
 	if t.isStopping() {
 		return errServiceStopping
 	}
-	pendingDir := filepath.Join(os.TempDir(), "bonjou-pending")
-	if err := os.MkdirAll(pendingDir, 0o755); err != nil {
+	fileName := filepath.Base(strings.TrimSpace(env.Name))
+	if fileName == "" || fileName == "." || fileName == string(os.PathSeparator) {
+		return errors.New("invalid file name in transfer")
+	}
+	destPath := strings.TrimSpace(env.Message)
+	if destPath == "" {
+		destPath = filepath.Join(t.cfg.ReceivedFilesDir, fileName)
+	}
+	destPath = queue.UniquePath(destPath)
+	if err := ensurePathWithinRoot(destPath, t.cfg.ReceivedFilesDir); err != nil {
 		return err
 	}
-	destPath := queue.UniquePath(filepath.Join(pendingDir, "file-"+env.Name))
-	
-	// Security: Prevent path traversal attacks
-	absDestPath, err := filepath.Abs(destPath)
-	if err != nil {
-		return fmt.Errorf("invalid path: %v", err)
-	}
-	absDirPath, err := filepath.Abs(pendingDir)
-	if err != nil {
-		return fmt.Errorf("invalid destination directory: %v", err)
-	}
-	if !strings.HasPrefix(absDestPath, absDirPath) {
-		return fmt.Errorf("path traversal not allowed: file would be written outside pending directory")
-	}
-
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
 		return err
 	}
@@ -528,22 +967,25 @@ func (t *TransferService) receiveFile(conn net.Conn, env *envelope, key []byte) 
 	}
 	cleanup := true
 	defer func() {
-		file.Close()
+		_ = file.Close()
 		if cleanup {
 			_ = os.Remove(destPath)
 		}
 	}()
+
 	hasher := sha256.New()
-	progressID := fmt.Sprintf("recv:%s", env.Name)
-	label := fmt.Sprintf("Receiving %s", env.Name)
+	defer func() {
+		_ = file.Close()
+	}()
 	ctx := progressContext{
-		id:        progressID,
-		label:     label,
+		id:        fmt.Sprintf("recv:%s", fileName),
+		label:     fmt.Sprintf("Receiving %s", fileName),
 		path:      destPath,
 		peer:      formatRemote(env.From, env.FromIP),
 		direction: "receive",
 		kind:      kindFile,
 	}
+
 	var dec cipher.Stream
 	if env.Encrypted {
 		nonce, err := hex.DecodeString(env.Nonce)
@@ -557,38 +999,41 @@ func (t *TransferService) receiveFile(conn net.Conn, env *envelope, key []byte) 
 		dec = s
 	}
 	if err := t.readWithProgress(conn, dec, file, env.Size, hasher, ctx); err != nil {
-		t.emitTransferIssue(kindFile, env.Name, env.From, destPath, err)
+		t.emitTransferIssue(kindFile, fileName, env.From, destPath, err)
 		return err
 	}
+
 	receivedChecksum := hex.EncodeToString(hasher.Sum(nil))
 	if !strings.EqualFold(receivedChecksum, env.Checksum) {
-		if err := t.writeInlineDeliveryAck(conn, key, env, kindFile, env.Name, "error"); err != nil {
-			t.sendDeliveryAckOutOfBand(env, kindFile, env.Name, "error")
+		if err := t.writeInlineDeliveryAck(conn, key, env, kindFile, fileName, "error"); err != nil {
+			t.sendDeliveryAckOutOfBand(env, kindFile, fileName, "error")
 		}
-		msg := fmt.Sprintf("File '%s' from %s did not arrive intact — data was corrupted in transit. Please ask them to send it again.", env.Name, env.From)
+		msg := fmt.Sprintf("File '%s' from %s did not arrive intact — data was corrupted in transit. Please ask them to send it again.", fileName, env.From)
 		t.emit(events.Event{Type: events.Error, Title: "Transfer integrity check failed", Message: msg, From: env.From, Timestamp: time.Now(), Path: destPath})
-		return fmt.Errorf("transfer integrity check failed for '%s'", env.Name)
-	}
-	cleanup = false
-	if err := t.writeInlineDeliveryAck(conn, key, env, kindFile, env.Name, "ok"); err != nil {
-		t.sendDeliveryAckOutOfBand(env, kindFile, env.Name, "ok")
+		return fmt.Errorf("transfer integrity check failed for '%s'", fileName)
 	}
 
-	_ = t.queue.AddFile(env.From, env.FromIP, env.Name, env.Size, destPath)
-	displayMsg := fmt.Sprintf("User %s wants to send a file: %s,%s", env.From, env.Name, formatSize(env.Size))
-	
+	if err := file.Close(); err != nil {
+		return err
+	}
+	cleanup = false
+
+	if err := t.writeInlineDeliveryAck(conn, key, env, kindFile, fileName, "ok"); err != nil {
+		t.sendDeliveryAckOutOfBand(env, kindFile, fileName, "ok")
+	}
+
 	t.emit(events.Event{
-		Type:      events.FilePending,
-		Title:     "File pending transfer",
-		Message:   displayMsg,
+		Type:      events.FileReceived,
+		Title:     "File received",
+		Message:   fileName,
 		From:      env.From,
 		Path:      destPath,
 		Size:      env.Size,
 		Timestamp: time.Now(),
-		Level:     "info",
 	})
-	
-	// Intentionally not adding to history until approved
+	if t.history != nil {
+		_ = t.history.AppendTransfer(env.From, t.localUsername(), destPath, env.Size, kindFile)
+	}
 	return nil
 }
 
@@ -600,27 +1045,43 @@ func (t *TransferService) receiveFolder(conn net.Conn, env *envelope, key []byte
 	if err := os.MkdirAll(pendingDir, 0o755); err != nil {
 		return err
 	}
-	tempPath := queue.UniquePath(filepath.Join(pendingDir, "raw-"+env.Name))
+	archiveName := filepath.Base(strings.TrimSpace(env.Name))
+	if archiveName == "" || archiveName == "." || archiveName == string(os.PathSeparator) {
+		return errors.New("invalid folder archive name in transfer")
+	}
+	tempPath := queue.UniquePath(filepath.Join(pendingDir, "raw-"+archiveName))
+	if err := ensurePathWithinRoot(tempPath, pendingDir); err != nil {
+		return err
+	}
 	file, err := os.Create(tempPath)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		file.Close()
-		os.Remove(tempPath)
+		_ = file.Close()
+		_ = os.Remove(tempPath)
 	}()
+
+	destDirName := strings.TrimSuffix(archiveName, ".zip")
+	destDir := strings.TrimSpace(env.Message)
+	if destDir == "" {
+		destDir = filepath.Join(t.cfg.ReceivedFoldersDir, destDirName)
+	}
+	destDir = queue.UniquePath(destDir)
+	if err := ensurePathWithinRoot(destDir, t.cfg.ReceivedFoldersDir); err != nil {
+		return err
+	}
+
 	hasher := sha256.New()
-	progressID := fmt.Sprintf("recv:%s", env.Name)
-	destDirName := strings.TrimSuffix(env.Name, ".zip")
-	displayPath := filepath.Join(pendingDir, destDirName)
 	ctx := progressContext{
-		id:        progressID,
+		id:        fmt.Sprintf("recv:%s", archiveName),
 		label:     fmt.Sprintf("Receiving %s", destDirName),
-		path:      displayPath,
+		path:      destDir,
 		peer:      formatRemote(env.From, env.FromIP),
 		direction: "receive",
 		kind:      kindFolder,
 	}
+
 	var dec cipher.Stream
 	if env.Encrypted {
 		nonce, err := hex.DecodeString(env.Nonce)
@@ -634,66 +1095,58 @@ func (t *TransferService) receiveFolder(conn net.Conn, env *envelope, key []byte
 		dec = s
 	}
 	if err := t.readWithProgress(conn, dec, file, env.Size, hasher, ctx); err != nil {
-		t.emitTransferIssue(kindFolder, destDirName, env.From, displayPath, err)
+		t.emitTransferIssue(kindFolder, destDirName, env.From, destDir, err)
 		return err
 	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+
 	receivedChecksum := hex.EncodeToString(hasher.Sum(nil))
 	if !strings.EqualFold(receivedChecksum, env.Checksum) {
-		if err := t.writeInlineDeliveryAck(conn, key, env, kindFolder, strings.TrimSuffix(env.Name, ".zip"), "error"); err != nil {
-			t.sendDeliveryAckOutOfBand(env, kindFolder, strings.TrimSuffix(env.Name, ".zip"), "error")
+		if err := t.writeInlineDeliveryAck(conn, key, env, kindFolder, destDirName, "error"); err != nil {
+			t.sendDeliveryAckOutOfBand(env, kindFolder, destDirName, "error")
 		}
 		msg := fmt.Sprintf("Folder '%s' from %s did not arrive intact — data was corrupted in transit. Please ask them to send it again.", destDirName, env.From)
 		t.emit(events.Event{Type: events.Error, Title: "Transfer integrity check failed", Message: msg, From: env.From, Timestamp: time.Now(), Path: tempPath})
 		return fmt.Errorf("transfer integrity check failed for folder '%s'", destDirName)
-	}
-	destDir := queue.UniquePath(displayPath)
-
-	// Security: Prevent path traversal attacks
-	absDestDir, err := filepath.Abs(destDir)
-	if err != nil {
-		return fmt.Errorf("invalid path: %v", err)
-	}
-	absFolderPath, err := filepath.Abs(pendingDir)
-	if err != nil {
-		return fmt.Errorf("invalid destination directory: %v", err)
-	}
-	if !strings.HasPrefix(absDestDir, absFolderPath) {
-		return fmt.Errorf("path traversal not allowed: folder would be written outside pending directory")
 	}
 
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return err
 	}
 	if err := unzip(tempPath, destDir); err != nil {
-		_ = os.RemoveAll(destDir) // Clean up partially extracted folder on failure
+		_ = os.RemoveAll(destDir)
 		if ackErr := t.writeInlineDeliveryAck(conn, key, env, kindFolder, destDirName, "error"); ackErr != nil {
 			t.sendDeliveryAckOutOfBand(env, kindFolder, destDirName, "error")
 		}
 		return err
 	}
+
 	if err := t.writeInlineDeliveryAck(conn, key, env, kindFolder, destDirName, "ok"); err != nil {
 		t.sendDeliveryAckOutOfBand(env, kindFolder, destDirName, "ok")
 	}
 
-	_ = t.queue.AddFolder(env.From, env.FromIP, destDirName, env.Size, destDir)
-	displayFolderMsg := fmt.Sprintf("User %s wants to send a folder: %s,%s", env.From, destDirName, formatSize(env.Size))
-	
+	displaySize := env.Size
+	if env.ActualSize > 0 {
+		displaySize = env.ActualSize
+	}
 	t.emit(events.Event{
-		Type:      events.FolderPending,
-		Title:     "Folder pending transfer",
-		Message:   displayFolderMsg,
+		Type:      events.FolderReceived,
+		Title:     "Folder received",
+		Message:   destDirName,
 		From:      env.From,
 		Path:      destDir,
-		Size:      env.Size,
+		Size:      displaySize,
 		Timestamp: time.Now(),
-		Level:     "info",
 	})
-	
-	// Intentionally not adding to history until approved
+	if t.history != nil {
+		_ = t.history.AppendTransfer(env.From, t.localUsername(), destDir, displaySize, kindFolder)
+	}
 	return nil
 }
 
-func (t *TransferService) copyWithProgress(writer io.Writer, enc cipher.Stream, reader io.Reader, total int64, ctx progressContext) error {
+func (t *TransferService) copyWithProgress(writer io.Writer, enc cipher.Stream, reader io.Reader, total int64, ctx progressContext, cancel <-chan struct{}) error {
 	chunkSize := t.chunkSize
 	if chunkSize <= 0 {
 		chunkSize = 64 * 1024
@@ -712,6 +1165,9 @@ func (t *TransferService) copyWithProgress(writer io.Writer, enc cipher.Stream, 
 	for {
 		if t.isStopping() {
 			return errServiceStopping
+		}
+		if err := t.checkCanceled(cancel); err != nil {
+			return err
 		}
 		n, err := reader.Read(buf)
 		if n > 0 {
@@ -945,10 +1401,12 @@ func (t *TransferService) renderDeliveryAck(env *envelope) {
 		peer = "peer"
 	}
 	if strings.EqualFold(env.AckStatus, "ok") {
+		message := fmt.Sprintf("Delivered: %s '%s' to %s", kindLabel, name, peer)
+		title := "Delivery confirmed"
 		t.emit(events.Event{
 			Type:      events.Status,
-			Title:     "Delivery confirmed",
-			Message:   fmt.Sprintf("Delivered: %s '%s' to %s", kindLabel, name, peer),
+			Title:     title,
+			Message:   message,
 			From:      env.From,
 			Timestamp: time.Now(),
 		})
@@ -1005,6 +1463,26 @@ func (t *TransferService) resolvePeerForAck(source *envelope) (*Peer, error) {
 	return &Peer{Username: source.From, IP: ip, Port: t.cfg.ListenPort, PublicKey: publicKey}, nil
 }
 
+func (t *TransferService) resolvePeerForQueueItem(sender, senderIP string) (*Peer, error) {
+	ip := strings.TrimSpace(senderIP)
+	if ip == "" {
+		return nil, errors.New("missing sender ip")
+	}
+	if t.discovery != nil {
+		if peer, err := t.discovery.Resolve(ip); err == nil {
+			return peer, nil
+		}
+	}
+	if t.discovery == nil {
+		return nil, errors.New("discovery service unavailable")
+	}
+	publicKey, ok := t.discovery.SharedPublicKey(sender, ip)
+	if !ok || strings.TrimSpace(publicKey) == "" {
+		return nil, fmt.Errorf("peer key unavailable for %s (%s)", sender, ip)
+	}
+	return &Peer{Username: sender, IP: ip, Port: t.cfg.ListenPort, PublicKey: publicKey}, nil
+}
+
 func deliveryAckKey(kind, name, peer string) string {
 	return strings.ToLower(strings.TrimSpace(kind)) + "|" + strings.ToLower(strings.TrimSpace(name)) + "|" + strings.ToLower(strings.TrimSpace(peer))
 }
@@ -1032,9 +1510,7 @@ func (t *TransferService) registerPendingAck(key string) chan *envelope {
 
 func (t *TransferService) unregisterPendingAck(key string) {
 	t.pendingAckMu.Lock()
-	if _, ok := t.pendingAcks[key]; ok {
-		delete(t.pendingAcks, key)
-	}
+	delete(t.pendingAcks, key)
 	t.pendingAckMu.Unlock()
 }
 
@@ -1078,9 +1554,9 @@ func (t *TransferService) waitPendingAck(ch chan *envelope, timeout time.Duratio
 
 func transferKindLabel(kind string) string {
 	switch strings.ToLower(strings.TrimSpace(kind)) {
-	case kindFolder:
+	case kindFolder, kindFolderOffer, kindFolderRequest, kindFolderReject:
 		return "Folder"
-	case kindFile:
+	case kindFile, kindFileOffer, kindFileRequest, kindFileReject:
 		return "File"
 	case kindMessage:
 		return "Message"
@@ -1094,14 +1570,12 @@ func transferDisplayName(kind, name string) string {
 	if trimmed == "" {
 		return "payload"
 	}
-	if strings.EqualFold(strings.TrimSpace(kind), kindFolder) {
+	if strings.EqualFold(strings.TrimSpace(kind), kindFolder) || strings.EqualFold(strings.TrimSpace(kind), kindFolderOffer) || strings.EqualFold(strings.TrimSpace(kind), kindFolderRequest) || strings.EqualFold(strings.TrimSpace(kind), kindFolderReject) {
 		return strings.TrimSuffix(trimmed, ".zip")
 	}
 	return trimmed
 }
 
-// humanizeTransferError converts low-level network and OS error strings
-// into plain-language messages that make sense to a non-technical user.
 func humanizeTransferError(err error) string {
 	if err == nil {
 		return ""
@@ -1120,10 +1594,11 @@ func humanizeTransferError(err error) string {
 		return "file no longer exists at the specified path"
 	case strings.Contains(msg, "permission denied"):
 		return "permission denied — check file and folder permissions"
-	case strings.Contains(msg, "no delivery confirmation"),
-		strings.Contains(msg, "integrity check failed"),
+	case strings.Contains(msg, "no delivery confirmation"):
+		return "upload finished, but delivery could not be confirmed — the transfer may or may not have completed on the peer"
+	case strings.Contains(msg, "integrity check failed"),
 		strings.Contains(msg, "Delivery failed"):
-		return msg // already a plain-language message
+		return msg
 	case strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline exceeded"):
 		return "connection timed out — check the peer is still reachable"
 	default:
@@ -1143,26 +1618,164 @@ func (t *TransferService) emitTransferIssue(kind, name, peer, path string, err e
 	if who == "" {
 		who = "peer"
 	}
-	if errors.Is(err, errServiceStopping) {
-		t.emit(events.Event{
-			Type:      events.Status,
-			Title:     "Transfer cancelled",
-			Message:   fmt.Sprintf("%s '%s' to %s was cancelled (Bonjou is shutting down)", transferKindLabel(kind), label, who),
-			From:      who,
-			Path:      path,
-			Timestamp: time.Now(),
-		})
-		return
+	message := humanizeTransferError(err)
+	if message == "" {
+		message = err.Error()
 	}
-	reason := humanizeTransferError(err)
 	t.emit(events.Event{
 		Type:      events.Error,
 		Title:     "Transfer failed",
-		Message:   fmt.Sprintf("Failed to send %s '%s' to %s: %s", transferKindLabel(kind), label, who, reason),
-		From:      who,
+		Message:   fmt.Sprintf("Failed to send %s '%s' to %s: %s", strings.ToLower(transferKindLabel(kind)), label, who, message),
+		To:        who,
 		Path:      path,
 		Timestamp: time.Now(),
 	})
+}
+
+func writeEnvelope(conn net.Conn, data []byte) error {
+	header := make([]byte, 4)
+	binary.BigEndian.PutUint32(header, uint32(len(data)))
+	if _, err := conn.Write(header); err != nil {
+		return err
+	}
+	if _, err := conn.Write(data); err != nil {
+		return err
+	}
+	return nil
+}
+
+func readEnvelope(conn net.Conn) ([]byte, error) {
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		return nil, err
+	}
+	size := binary.BigEndian.Uint32(header)
+	if size == 0 {
+		return nil, errors.New("empty envelope")
+	}
+	frame := make([]byte, size)
+	if _, err := io.ReadFull(conn, frame); err != nil {
+		return nil, err
+	}
+	return frame, nil
+}
+
+func (t *TransferService) readSecureEnvelope(conn net.Conn) (*envelope, []byte, error) {
+	frame, err := readEnvelope(conn)
+	if err != nil {
+		return nil, nil, err
+	}
+	remoteIPs := remoteIPCandidates(conn)
+	if len(remoteIPs) == 0 {
+		return nil, nil, errors.New("unable to resolve remote address")
+	}
+	if t.discovery == nil {
+		return nil, nil, errors.New("discovery service unavailable")
+	}
+
+	var shared []byte
+	for _, ip := range remoteIPs {
+		publicKey, ok := t.discovery.SharedPublicKey("", ip)
+		if !ok || strings.TrimSpace(publicKey) == "" {
+			continue
+		}
+		key, err := t.sharedKey(publicKey)
+		if err != nil {
+			continue
+		}
+		env, err := openEnvelope(frame, key)
+		if err == nil {
+			return env, key, nil
+		}
+		shared = key
+	}
+	if shared == nil {
+		return nil, nil, errors.New("unable to derive shared key")
+	}
+
+	env, err := openEnvelope(frame, shared)
+	if err != nil {
+		return nil, nil, err
+	}
+	return env, shared, nil
+}
+
+func sealEnvelope(env *envelope, shared []byte) ([]byte, error) {
+	plain, err := json.Marshal(env)
+	if err != nil {
+		return nil, err
+	}
+	nonce, err := randomNonce()
+	if err != nil {
+		return nil, err
+	}
+	stream, err := newCipherStream(shared, nonce)
+	if err != nil {
+		return nil, err
+	}
+	payload := make([]byte, len(plain))
+	copy(payload, plain)
+	stream.XORKeyStream(payload, payload)
+	mac := hmac.New(sha256.New, shared)
+	mac.Write(payload)
+	sealed := sealedEnvelope{
+		Nonce:    hex.EncodeToString(nonce),
+		Payload:  base64.StdEncoding.EncodeToString(payload),
+		HMAC:     hex.EncodeToString(mac.Sum(nil)),
+		Encoding: "base64",
+	}
+	return json.Marshal(sealed)
+}
+
+func openEnvelope(frame []byte, shared []byte) (*envelope, error) {
+	var sealed sealedEnvelope
+	if err := json.Unmarshal(frame, &sealed); err != nil {
+		return nil, err
+	}
+	if sealed.Encoding != "" && sealed.Encoding != "base64" {
+		return nil, fmt.Errorf("unsupported envelope encoding: %s", sealed.Encoding)
+	}
+	nonce, err := hex.DecodeString(sealed.Nonce)
+	if err != nil {
+		return nil, fmt.Errorf("decode envelope nonce: %w", err)
+	}
+	payload, err := base64.StdEncoding.DecodeString(sealed.Payload)
+	if err != nil {
+		return nil, fmt.Errorf("decode envelope payload: %w", err)
+	}
+	mac := hmac.New(sha256.New, shared)
+	mac.Write(payload)
+	expectedMAC := hex.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(expectedMAC), []byte(sealed.HMAC)) {
+		return nil, errors.New("sealed envelope hmac mismatch")
+	}
+	stream, err := newCipherStream(shared, nonce)
+	if err != nil {
+		return nil, err
+	}
+	plain := make([]byte, len(payload))
+	copy(plain, payload)
+	stream.XORKeyStream(plain, plain)
+
+	var env envelope
+	if err := json.Unmarshal(plain, &env); err != nil {
+		return nil, err
+	}
+	return &env, nil
+}
+
+func newCipherStream(key, nonce []byte) (cipher.Stream, error) {
+	if len(key) < 32 {
+		return nil, errors.New("shared key too short")
+	}
+	block, err := aes.NewCipher(key[:32])
+	if err != nil {
+		return nil, err
+	}
+	if len(nonce) < aes.BlockSize {
+		return nil, errors.New("nonce too short")
+	}
+	return cipher.NewCTR(block, nonce[:aes.BlockSize]), nil
 }
 
 func randomNonce() ([]byte, error) {
@@ -1173,51 +1786,125 @@ func randomNonce() ([]byte, error) {
 	return nonce, nil
 }
 
-func deriveCipherKey(shared []byte) []byte {
-	h := sha256.New()
-	h.Write([]byte("bonjou-encryption"))
-	h.Write(shared)
-	return h.Sum(nil)
+func randomHexID(n int) (string, error) {
+	buf := make([]byte, n)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
 }
 
-func newCipherStream(shared []byte, nonce []byte) (cipher.Stream, error) {
-	if len(nonce) != aes.BlockSize {
-		return nil, fmt.Errorf("invalid nonce length")
+func encryptText(shared, nonce []byte, plain string) (string, error) {
+	stream, err := newCipherStream(shared, nonce)
+	if err != nil {
+		return "", err
 	}
-	key := deriveCipherKey(shared)
-	block, err := aes.NewCipher(key)
+	buf := []byte(plain)
+	out := make([]byte, len(buf))
+	copy(out, buf)
+	stream.XORKeyStream(out, out)
+	return base64.StdEncoding.EncodeToString(out), nil
+}
+
+func decryptText(shared, nonce []byte, cipherText, encoding string) (string, error) {
+	if encoding != "" && encoding != "base64" {
+		return "", fmt.Errorf("unsupported text encoding: %s", encoding)
+	}
+	payload, err := base64.StdEncoding.DecodeString(cipherText)
+	if err != nil {
+		return "", err
+	}
+	stream, err := newCipherStream(shared, nonce)
+	if err != nil {
+		return "", err
+	}
+	out := make([]byte, len(payload))
+	copy(out, payload)
+	stream.XORKeyStream(out, out)
+	return string(out), nil
+}
+
+func (t *TransferService) sharedKey(remotePublicKey string) ([]byte, error) {
+	localKey, err := privateKeyFromSecret(t.cfg.Secret)
 	if err != nil {
 		return nil, err
 	}
-	return cipher.NewCTR(block, nonce), nil
+	remoteBytes, err := hex.DecodeString(strings.TrimSpace(remotePublicKey))
+	if err != nil {
+		return nil, err
+	}
+	curve := ecdh.X25519()
+	remoteKey, err := curve.NewPublicKey(remoteBytes)
+	if err != nil {
+		return nil, err
+	}
+	shared, err := localKey.ECDH(remoteKey)
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(shared)
+	return sum[:], nil
 }
 
-func encryptText(shared []byte, nonce []byte, plaintext string) (string, error) {
-	stream, err := newCipherStream(shared, nonce)
-	if err != nil {
-		return "", err
-	}
-	plainBytes := []byte(plaintext)
-	cipherBytes := make([]byte, len(plainBytes))
-	stream.XORKeyStream(cipherBytes, plainBytes)
-	return base64.StdEncoding.EncodeToString(cipherBytes), nil
+func normalizeMessageLineEndings(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	return s
 }
 
-func decryptText(shared []byte, nonce []byte, ciphertext, encoding string) (string, error) {
-	if encoding != "" && encoding != "base64" {
-		return "", fmt.Errorf("unsupported encoding: %s", encoding)
+func remoteIPCandidates(conn net.Conn) []string {
+	if conn == nil {
+		return nil
 	}
-	data, err := base64.StdEncoding.DecodeString(ciphertext)
+	addr := conn.RemoteAddr()
+	if addr == nil {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(addr.String())
 	if err != nil {
-		return "", err
+		host = addr.String()
 	}
-	stream, err := newCipherStream(shared, nonce)
-	if err != nil {
-		return "", err
+	if ip := net.ParseIP(host); ip != nil {
+		return []string{ip.String()}
 	}
-	plain := make([]byte, len(data))
-	stream.XORKeyStream(plain, data)
-	return string(plain), nil
+	return nil
+}
+
+func formatPeer(peer *Peer) string {
+	if peer == nil {
+		return "peer"
+	}
+	if strings.TrimSpace(peer.Username) != "" {
+		if strings.TrimSpace(peer.IP) != "" {
+			return fmt.Sprintf("%s (%s)", peer.Username, peer.IP)
+		}
+		return peer.Username
+	}
+	if strings.TrimSpace(peer.IP) != "" {
+		return peer.IP
+	}
+	return "peer"
+}
+
+func formatRemote(user, ip string) string {
+	if strings.TrimSpace(user) != "" && strings.TrimSpace(ip) != "" {
+		return fmt.Sprintf("%s (%s)", user, ip)
+	}
+	if strings.TrimSpace(user) != "" {
+		return user
+	}
+	if strings.TrimSpace(ip) != "" {
+		return ip
+	}
+	return "peer"
+}
+
+func safeRemoteLabel(user, ip string) string {
+	label := formatRemote(user, ip)
+	if strings.TrimSpace(label) == "" {
+		return "peer"
+	}
+	return label
 }
 
 func (t *TransferService) identity() (string, string) {
@@ -1245,353 +1932,159 @@ func (t *TransferService) UpdateLocalEndpoint(username, ip string) {
 	t.localMu.Unlock()
 }
 
-func (t *TransferService) sharedKey(peerPublicKey string) ([]byte, error) {
-	if strings.TrimSpace(peerPublicKey) == "" {
-		return nil, errors.New("missing peer public key")
-	}
-	key, err := sharedKeyFromPeerPublic(t.cfg.Secret, peerPublicKey)
-	if err != nil {
-		return nil, fmt.Errorf("derive shared key from peer public key: %w", err)
-	}
-	return key, nil
+func (t *TransferService) localUsername() string {
+	t.localMu.RLock()
+	defer t.localMu.RUnlock()
+	return t.localUser
 }
 
-func writeEnvelope(conn net.Conn, data []byte) error {
-	header := make([]byte, 4)
-	binary.BigEndian.PutUint32(header, uint32(len(data)))
-	if _, err := conn.Write(header); err != nil {
+func (t *TransferService) storeOutgoingApproval(requestID string, approval *outgoingApproval) {
+	t.outgoingMu.Lock()
+	t.outgoingApprovals[requestID] = approval
+	_ = t.saveOutgoingApprovalsLocked()
+	t.outgoingMu.Unlock()
+}
+
+func (t *TransferService) getOutgoingApproval(requestID string) (*outgoingApproval, bool) {
+	t.outgoingMu.Lock()
+	defer t.outgoingMu.Unlock()
+	approval, ok := t.outgoingApprovals[requestID]
+	if !ok {
+		return nil, false
+	}
+	copy := *approval
+	return &copy, true
+}
+
+func (t *TransferService) deleteOutgoingApproval(requestID string) {
+	t.outgoingMu.Lock()
+	delete(t.outgoingApprovals, requestID)
+	_ = t.saveOutgoingApprovalsLocked()
+	t.outgoingMu.Unlock()
+}
+
+func (t *TransferService) loadOutgoingApprovals() {
+	if err := os.MkdirAll(filepath.Dir(t.outgoingSnapshotPath), 0o755); err != nil {
+		t.logger.Error("prepare outgoing approval directory: %v", err)
+		return
+	}
+
+	data, err := os.ReadFile(t.outgoingSnapshotPath)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			t.logger.Error("read outgoing approvals: %v", err)
+		}
+		return
+	}
+
+	var snapshot map[string]*outgoingApproval
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		t.logger.Error("decode outgoing approvals: %v", err)
+		return
+	}
+
+	t.outgoingMu.Lock()
+	defer t.outgoingMu.Unlock()
+
+	for requestID, approval := range snapshot {
+		if approval == nil {
+			continue
+		}
+		if strings.TrimSpace(requestID) == "" || strings.TrimSpace(approval.Path) == "" {
+			continue
+		}
+		info, err := os.Stat(approval.Path)
+		if err != nil {
+			continue
+		}
+		switch approval.Kind {
+		case kindFile:
+			if info.IsDir() {
+				continue
+			}
+		case kindFolder:
+			if !info.IsDir() {
+				continue
+			}
+		default:
+			continue
+		}
+		copy := *approval
+		t.outgoingApprovals[requestID] = &copy
+	}
+}
+
+func (t *TransferService) saveOutgoingApprovalsLocked() error {
+	if err := os.MkdirAll(filepath.Dir(t.outgoingSnapshotPath), 0o755); err != nil {
 		return err
 	}
-	if _, err := conn.Write(data); err != nil {
+
+	data, err := json.MarshalIndent(t.outgoingApprovals, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	tempPath := t.outgoingSnapshotPath + ".tmp"
+	if err := os.WriteFile(tempPath, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tempPath, t.outgoingSnapshotPath); err != nil {
+		_ = os.Remove(tempPath)
 		return err
 	}
 	return nil
 }
 
-func readEnvelope(conn net.Conn) ([]byte, error) {
-	header := make([]byte, 4)
-	if _, err := io.ReadFull(conn, header); err != nil {
-		return nil, err
-	}
-	length := binary.BigEndian.Uint32(header)
-	payload := make([]byte, length)
-	if _, err := io.ReadFull(conn, payload); err != nil {
-		return nil, err
-	}
-	return payload, nil
-}
+func (t *TransferService) beginCancelableOperation() (<-chan struct{}, func()) {
+	t.cancelMu.Lock()
+	cancel := make(chan struct{})
+	t.cancelActive = cancel
+	t.cancelMu.Unlock()
 
-func (t *TransferService) readSecureEnvelope(conn net.Conn) (*envelope, []byte, error) {
-	frame, err := readEnvelope(conn)
-	if err != nil {
-		return nil, nil, err
-	}
-	remoteIPs := remoteIPCandidates(conn)
-	if len(remoteIPs) == 0 {
-		return nil, nil, errors.New("unable to resolve remote address")
-	}
-	if t.discovery == nil {
-		return nil, nil, errors.New("discovery service unavailable")
-	}
-	var publicKey string
-	for _, ip := range remoteIPs {
-		if key, ok := t.discovery.SharedPublicKey("", ip); ok && strings.TrimSpace(key) != "" {
-			publicKey = key
-			break
+	return cancel, func() {
+		t.cancelMu.Lock()
+		if t.cancelActive == cancel {
+			t.cancelActive = nil
 		}
+		t.cancelMu.Unlock()
 	}
-	if strings.TrimSpace(publicKey) == "" {
-		return nil, nil, fmt.Errorf("peer key unavailable for %s", remoteIPs[0])
-	}
-	shared, err := t.sharedKey(publicKey)
-	if err != nil {
-		return nil, nil, err
-	}
-	env, err := openEnvelope(frame, shared)
-	if err != nil {
-		return nil, nil, err
-	}
-	return env, shared, nil
 }
 
-func sealEnvelope(env *envelope, shared []byte) ([]byte, error) {
-	plain, err := json.Marshal(env)
-	if err != nil {
-		return nil, err
+func (t *TransferService) CancelActiveOperation() bool {
+	t.cancelMu.Lock()
+	defer t.cancelMu.Unlock()
+	if t.cancelActive == nil {
+		return false
 	}
-	nonce, err := randomNonce()
-	if err != nil {
-		return nil, err
-	}
-	stream, err := newCipherStream(shared, nonce)
-	if err != nil {
-		return nil, err
-	}
-	cipherText := make([]byte, len(plain))
-	stream.XORKeyStream(cipherText, plain)
-	mac := hmac.New(sha256.New, shared)
-	mac.Write([]byte("bonjou-envelope-v1"))
-	mac.Write(nonce)
-	mac.Write(cipherText)
-	sealed := sealedEnvelope{
-		Nonce:    hex.EncodeToString(nonce),
-		Payload:  base64.StdEncoding.EncodeToString(cipherText),
-		HMAC:     hex.EncodeToString(mac.Sum(nil)),
-		Encoding: "base64",
-	}
-	return json.Marshal(sealed)
+	close(t.cancelActive)
+	t.cancelActive = nil
+	return true
 }
 
-func openEnvelope(frame []byte, shared []byte) (*envelope, error) {
-	var sealed sealedEnvelope
-	if err := json.Unmarshal(frame, &sealed); err != nil {
-		return nil, err
-	}
-	if sealed.Encoding != "" && sealed.Encoding != "base64" {
-		return nil, fmt.Errorf("unsupported envelope encoding: %s", sealed.Encoding)
-	}
-	nonce, err := hex.DecodeString(sealed.Nonce)
-	if err != nil {
-		return nil, fmt.Errorf("decode envelope nonce: %w", err)
-	}
-	cipherText, err := base64.StdEncoding.DecodeString(sealed.Payload)
-	if err != nil {
-		return nil, fmt.Errorf("decode envelope payload: %w", err)
-	}
-	providedMAC, err := hex.DecodeString(sealed.HMAC)
-	if err != nil {
-		return nil, fmt.Errorf("decode envelope hmac: %w", err)
-	}
-	mac := hmac.New(sha256.New, shared)
-	mac.Write([]byte("bonjou-envelope-v1"))
-	mac.Write(nonce)
-	mac.Write(cipherText)
-	if !hmac.Equal(mac.Sum(nil), providedMAC) {
-		return nil, errors.New("invalid envelope signature")
-	}
-	stream, err := newCipherStream(shared, nonce)
-	if err != nil {
-		return nil, err
-	}
-	plain := make([]byte, len(cipherText))
-	stream.XORKeyStream(plain, cipherText)
-	var env envelope
-	if err := json.Unmarshal(plain, &env); err != nil {
-		return nil, err
-	}
-	return &env, nil
-}
-
-func remoteIPCandidates(conn net.Conn) []string {
-	if conn == nil || conn.RemoteAddr() == nil {
+func (t *TransferService) checkCanceled(cancel <-chan struct{}) error {
+	if cancel == nil {
 		return nil
 	}
-	raw := strings.TrimSpace(conn.RemoteAddr().String())
-	host, _, err := net.SplitHostPort(raw)
-	if err == nil {
-		raw = strings.TrimSpace(host)
-	}
-	if strings.HasPrefix(raw, "[") && strings.HasSuffix(raw, "]") {
-		raw = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(raw, "["), "]"))
-	}
-	if strings.Contains(raw, "%") {
-		raw = strings.TrimSpace(strings.SplitN(raw, "%", 2)[0])
-	}
-	if raw == "" {
-		return nil
-	}
-	seen := make(map[string]struct{})
-	add := func(value string, out *[]string) {
-		v := strings.TrimSpace(value)
-		if v == "" {
-			return
-		}
-		if _, exists := seen[v]; exists {
-			return
-		}
-		seen[v] = struct{}{}
-		*out = append(*out, v)
-	}
-	var out []string
-	add(raw, &out)
-	if ip := net.ParseIP(raw); ip != nil {
-		add(ip.String(), &out)
-		if v4 := ip.To4(); v4 != nil {
-			add(v4.String(), &out)
-			add("::ffff:"+v4.String(), &out)
-		}
-	}
-	return out
-}
-
-func formatPeer(peer *Peer) string {
-	if peer == nil {
-		return ""
-	}
-	if peer.Username != "" {
-		return fmt.Sprintf("%s@%s:%d", peer.Username, peer.IP, peer.Port)
-	}
-	if peer.IP != "" && peer.Port != 0 {
-		return fmt.Sprintf("%s:%d", peer.IP, peer.Port)
-	}
-	return peer.IP
-}
-
-func formatRemote(name, ip string) string {
-	trimmedName := strings.TrimSpace(name)
-	trimmedIP := strings.TrimSpace(ip)
-	switch {
-	case trimmedName != "" && trimmedIP != "":
-		return fmt.Sprintf("%s@%s", trimmedName, trimmedIP)
-	case trimmedIP != "":
-		return trimmedIP
+	select {
+	case <-cancel:
+		return errors.New("operation cancelled")
 	default:
-		return trimmedName
+		return nil
 	}
 }
 
-// transferFile holds an open file handle together with its pre-computed
-// size and SHA-256 checksum. Because all three values come from a single
-// open(2) call, the stat/checksum/stream race — which can cause a
-// checksum mismatch when a file is modified between separate operations —
-// is eliminated.
-type transferFile struct {
-	file     *os.File
-	size     int64
-	checksum string
-}
-
-// openTransferFile opens path once, reads through it to compute its
-// SHA-256 checksum, then seeks back to the beginning so the caller can
-// stream the exact same bytes to the network.
-func openTransferFile(path string) (*transferFile, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	stat, err := f.Stat()
-	if err != nil {
-		f.Close()
-		return nil, err
-	}
-	hasher := sha256.New()
-	if _, err := io.Copy(hasher, f); err != nil {
-		f.Close()
-		return nil, fmt.Errorf("failed to read file for checksum: %w", err)
-	}
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		f.Close()
-		return nil, fmt.Errorf("failed to seek file for streaming: %w", err)
-	}
-	return &transferFile{
-		file:     f,
-		size:     stat.Size(),
-		checksum: hex.EncodeToString(hasher.Sum(nil)),
-	}, nil
-}
-
-func uniquePath(path string) string {
-	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		return path
-	}
-	base := path
-	ext := ""
-	if dot := strings.LastIndex(path, "."); dot != -1 {
-		base = path[:dot]
-		ext = path[dot:]
-	}
-	for i := 1; ; i++ {
-		candidate := fmt.Sprintf("%s_%d%s", base, i, ext)
-		if _, err := os.Stat(candidate); errors.Is(err, os.ErrNotExist) {
-			return candidate
-		}
-	}
-}
-
-func zipDirectory(dir string) (string, error) {
-	tempFile, err := os.CreateTemp("", "bonjou-*.zip")
-	if err != nil {
-		return "", err
-	}
-	defer tempFile.Close()
-	archive := zip.NewWriter(tempFile)
-	err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(dir, path)
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			if rel == "." {
-				return nil
-			}
-			_, err := archive.Create(rel + "/")
-			return err
-		}
-		header, err := zip.FileInfoHeader(info)
-		if err != nil {
-			return err
-		}
-		header.Name = rel
-		header.Method = zip.Deflate
-		writer, err := archive.CreateHeader(header)
-		if err != nil {
-			return err
-		}
-		file, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		if _, err := io.Copy(writer, file); err != nil {
-			file.Close()
-			return err
-		}
-		return file.Close()
-	})
-	if err != nil {
-		archive.Close()
-		return "", err
-	}
-	if err := archive.Close(); err != nil {
-		return "", err
-	}
-	return tempFile.Name(), nil
-}
-
-func unzip(zipPath, dest string) error {
-	reader, err := zip.OpenReader(zipPath)
+func ensurePathWithinRoot(path, root string) error {
+	cleanRoot := filepath.Clean(root)
+	cleanPath := filepath.Clean(path)
+	rel, err := filepath.Rel(cleanRoot, cleanPath)
 	if err != nil {
 		return err
 	}
-	defer reader.Close()
-	for _, file := range reader.File {
-		targetPath := filepath.Join(dest, file.Name)
-		if file.FileInfo().IsDir() {
-			if err := os.MkdirAll(targetPath, 0o755); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
-			return err
-		}
-		src, err := file.Open()
-		if err != nil {
-			return err
-		}
-		dst, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, file.Mode())
-		if err != nil {
-			src.Close()
-			return err
-		}
-		if _, err := io.Copy(dst, src); err != nil {
-			src.Close()
-			dst.Close()
-			return err
-		}
-		src.Close()
+	if rel == "." {
+		return nil
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("path traversal not allowed: %s escapes %s", cleanPath, cleanRoot)
 	}
 	return nil
 }
@@ -1607,4 +2100,238 @@ func formatSize(size int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(size)/float64(div), "KMGTPE"[exp])
+}
+
+func folderPreview(root string, cancel <-chan struct{}) (string, error) {
+	type item struct {
+		path  string
+		isDir bool
+	}
+	var items []item
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		select {
+		case <-cancel:
+			return errors.New("operation cancelled")
+		default:
+		}
+		if path == root {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return nil
+		}
+		items = append(items, item{path: filepath.ToSlash(rel), isDir: d.IsDir()})
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].isDir != items[j].isDir {
+			return items[i].isDir
+		}
+		return strings.ToLower(items[i].path) < strings.ToLower(items[j].path)
+	})
+	if len(items) == 0 {
+		return "(empty)", nil
+	}
+	maxLines := 64
+	var lines []string
+	for i, item := range items {
+		if i >= maxLines {
+			lines = append(lines, fmt.Sprintf("... and %d more entries", len(items)-maxLines))
+			break
+		}
+		if item.isDir {
+			lines = append(lines, item.path+"/")
+		} else {
+			lines = append(lines, item.path)
+		}
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+func zipDirectory(dir string, cancel <-chan struct{}) (string, error) {
+	tempFile, err := os.CreateTemp("", "bonjou-folder-*.zip")
+	if err != nil {
+		return "", err
+	}
+	tempPath := tempFile.Name()
+	zw := zip.NewWriter(tempFile)
+
+	err = filepath.Walk(dir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		select {
+		case <-cancel:
+			return errors.New("operation cancelled")
+		default:
+		}
+		if path == dir {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+		header.Name = rel
+		if info.IsDir() {
+			header.Name += "/"
+		} else {
+			header.Method = zip.Deflate
+		}
+
+		writer, err := zw.CreateHeader(header)
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(writer, file)
+		closeErr := file.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		return nil
+	})
+
+	closeErr := zw.Close()
+	fileCloseErr := tempFile.Close()
+
+	if err != nil {
+		_ = os.Remove(tempPath)
+		return "", err
+	}
+	if closeErr != nil {
+		_ = os.Remove(tempPath)
+		return "", closeErr
+	}
+	if fileCloseErr != nil {
+		_ = os.Remove(tempPath)
+		return "", fileCloseErr
+	}
+	return tempPath, nil
+}
+
+func directorySize(root string, cancel <-chan struct{}) (int64, error) {
+	var total int64
+	err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		select {
+		case <-cancel:
+			return errors.New("operation cancelled")
+		default:
+		}
+		if info == nil || info.IsDir() {
+			return nil
+		}
+		total += info.Size()
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+func unzip(src, dest string) error {
+	r, err := zip.OpenReader(src)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+
+	for _, file := range r.File {
+		targetPath := filepath.Join(dest, filepath.FromSlash(file.Name))
+		if err := ensurePathWithinRoot(targetPath, dest); err != nil {
+			return err
+		}
+		if file.FileInfo().IsDir() {
+			if err := os.MkdirAll(targetPath, 0o755); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+			return err
+		}
+		rc, err := file.Open()
+		if err != nil {
+			return err
+		}
+		out, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, file.Mode())
+		if err != nil {
+			_ = rc.Close()
+			return err
+		}
+		if _, err := io.Copy(out, rc); err != nil {
+			_ = out.Close()
+			_ = rc.Close()
+			return err
+		}
+		if err := out.Close(); err != nil {
+			_ = rc.Close()
+			return err
+		}
+		if err := rc.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type transferFile struct {
+	file     *os.File
+	size     int64
+	checksum string
+}
+
+// openTransferFile opens path once, reads through it to compute its
+// SHA-256 checksum, then seeks back to the beginning so the caller can
+// stream the exact same bytes to the network.
+func openTransferFile(path string) (*transferFile, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, file); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return &transferFile{
+		file:     file,
+		size:     info.Size(),
+		checksum: hex.EncodeToString(hasher.Sum(nil)),
+	}, nil
 }

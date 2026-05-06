@@ -25,7 +25,7 @@ Output:
 ```
 Username: hamza
 IP: 192.168.1.10
-Port: 46321
+Listen port: 46321
 ```
 
 ### Computer 2 (Hassan)
@@ -41,7 +41,7 @@ See who is on the network:
 ```
 Output:
 ```
-hamza (192.168.1.10)
+hamza (192.168.1.10) • seen just now
 ```
 
 Send a message:
@@ -58,12 +58,19 @@ On Hassan's computer:
 @file hamza ~/Documents/notes.pdf
 ```
 
-You will see progress:
+Hamza will see a pending-transfer notice like:
 ```
-Sending notes.pdf... 45%... 100% done
+Pending file [1] from hassan: notes.pdf (12.3 KB)
+Run @queue, @view 1, @approve 1, or @reject 1
 ```
 
-Hamza receives it in:
+Then Hamza can review and approve it:
+```
+@queue
+@approve 1
+```
+
+After approval, the file is saved in:
 ```
 ~/.bonjou/received/files/notes.pdf
 ```
@@ -75,9 +82,22 @@ On Hamza's computer:
 @folder hassan ./project-files
 ```
 
-Bonjou zips the folder, sends it, and unzips on the other side.
+Bonjou zips the folder, sends it, and extracts it into a pending area on the other side.
 
-Hassan receives it in:
+Hassan will see a pending-transfer notice like:
+```
+Pending folder [1] from hamza: project-files (248.0 KB)
+Run @queue, @view 1, @approve 1, or @reject 1
+```
+
+Then Hassan can inspect and approve it:
+```
+@queue
+@view 1
+@approve 1
+```
+
+After approval, the folder is saved in:
 ```
 ~/.bonjou/received/folders/project-files/
 ```
@@ -88,7 +108,7 @@ Hassan receives it in:
 @broadcast Break time in 5 minutes!
 ```
 
-Everyone on the network sees this message.
+Each discovered user receives this message.
 
 ## Check History
 
@@ -96,7 +116,7 @@ Everyone on the network sees this message.
 @history
 ```
 
-Shows all past messages and transfers.
+Shows saved chat history and approved transfers.
 
 ## Exit
 
