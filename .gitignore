@@ -3,3 +3,6 @@ dist/
 .DS_Store
 .idea/
 .vscode/
+.superset/
+/bonjou
+/bonjou.exe

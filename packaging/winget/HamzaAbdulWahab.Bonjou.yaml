@@ -21,7 +21,7 @@ Tags:
   - lan
   - terminal
 Icons:
-  - IconUrl: https://raw.githubusercontent.com/hamzaabdulwahab/bonjou-cli/main/logo.png
+  - IconUrl: https://raw.githubusercontent.com/hamzaabdulwahab/bonjou-cli/main/docs/assets/logo.png
     IconFileType: png
     IconResolution: custom
     IconTheme: default
