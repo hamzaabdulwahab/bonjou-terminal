@@ -3,6 +3,7 @@ package commands
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -29,15 +30,46 @@ var (
 	errWizardBack        = errors.New("wizard back")
 	errWizardNoSelection = errors.New("wizard no recipients selected")
 	wizardAnchorSet      bool
+	wizardAnchorMu       sync.Mutex
 	ansiPrefixPattern    = regexp.MustCompile(`^(?:\x1b\[[0-9;?]*[A-Za-z])+`)
 )
 
 // WizardRenderActive reports whether the wizard currently owns a saved render anchor.
 func WizardRenderActive() bool {
+	wizardAnchorMu.Lock()
+	defer wizardAnchorMu.Unlock()
 	return wizardAnchorSet
 }
 
+// BeginWizardExternalOutput clears the current wizard render area so a line
+// from the main UI can be printed above the wizard. The caller must follow a
+// true return value with EndWizardExternalOutput after writing the line.
+func BeginWizardExternalOutput(w io.Writer) bool {
+	wizardAnchorMu.Lock()
+	if !wizardAnchorSet {
+		wizardAnchorMu.Unlock()
+		return false
+	}
+	fmt.Fprint(w, "\r"+wizardRestoreCursorAndClear)
+	return true
+}
+
+// EndWizardExternalOutput saves a new wizard anchor below the line that the UI
+// just printed, so the next wizard redraw starts beneath fresh output.
+func EndWizardExternalOutput(w io.Writer) {
+	fmt.Fprint(w, wizardSaveCursor)
+	wizardAnchorMu.Unlock()
+}
+
 const wizardBackValue = "__wizard_back__"
+
+const (
+	wizardRenderWidth           = 28
+	wizardMinWidth              = 1
+	wizardMinHeight             = 8
+	wizardSaveCursor            = "\x1b7"
+	wizardRestoreCursorAndClear = "\x1b8\033[J"
+)
 
 // Result carries command execution outcome back to the UI.
 type Result struct {
@@ -437,7 +469,7 @@ func (h *Handler) cmdWizard() (Result, error) {
 	status := ""
 	for {
 		action := ""
-		description := "Choose what to send. Press Ctrl+C anytime to exit wizard."
+		description := "Choose action. Ctrl+C exits."
 
 		if err := runWizardMenuForm(
 			status,
@@ -492,7 +524,7 @@ func (h *Handler) cmdWizard() (Result, error) {
 		status = strings.TrimSpace(actionStatus)
 		if status == "" {
 			h.waitForWizardEventFlush(900 * time.Millisecond)
-			status = wizardStatusInfo("Ready for another action.")
+			status = ""
 			continue
 		}
 	}
@@ -706,7 +738,7 @@ func (h *Handler) wizardSendMulti() (string, error) {
 			if len(errs) > 0 {
 				return wizardStatusError(fmt.Sprintf("Completed %d transfers, %d errors: %s", success, len(errs), strings.Join(errs, " | "))), nil
 			}
-			return wizardStatusInfo(fmt.Sprintf("Completed %d transfers", success)), nil
+			return "", nil
 		}
 	}
 }
@@ -759,9 +791,9 @@ func (h *Handler) wizardSelectPeer(title string) (*network.Peer, error) {
 
 	selectedIP := ""
 	options := make([]huh.Option[string], 0, len(peers))
-	options = append(options, huh.NewOption("← Back to wizard menu", wizardBackValue))
+	options = append(options, huh.NewOption("Back", wizardBackValue))
 	for _, peer := range peers {
-		label := fmt.Sprintf("%s (%s)", safePeerLabel(peer.Username), peer.IP)
+		label := wizardPeerLabel(peer)
 		options = append(options, huh.NewOption(label, peer.IP))
 	}
 
@@ -770,7 +802,7 @@ func (h *Handler) wizardSelectPeer(title string) (*network.Peer, error) {
 			huh.NewGroup(
 				huh.NewSelect[string]().
 					Title(title).
-					Description("Select a user by username and IP.").
+					Description("Choose recipient.").
 					Options(options...).
 					Value(&selectedIP),
 			),
@@ -797,9 +829,9 @@ func (h *Handler) wizardSelectPeers(title string) ([]*network.Peer, error) {
 			huh.NewGroup(
 				huh.NewConfirm().
 					Title(title).
-					Description("Select recipients, or go back to the wizard menu.").
+					Description("Choose recipients.").
 					Affirmative("Select recipients").
-					Negative("Back to wizard menu").
+					Negative("Back").
 					Value(&backToMenu),
 			),
 		),
@@ -813,7 +845,7 @@ func (h *Handler) wizardSelectPeers(title string) ([]*network.Peer, error) {
 	selectedIPs := make([]string, 0)
 	options := make([]huh.Option[string], 0, len(peers))
 	for _, peer := range peers {
-		label := fmt.Sprintf("%s (%s)", safePeerLabel(peer.Username), peer.IP)
+		label := wizardPeerLabel(peer)
 		options = append(options, huh.NewOption(label, peer.IP))
 	}
 
@@ -822,7 +854,7 @@ func (h *Handler) wizardSelectPeers(title string) ([]*network.Peer, error) {
 			huh.NewGroup(
 				huh.NewMultiSelect[string]().
 					Title(title).
-					Description("Select one or more users by username and IP.").
+					Description("Pick one or more.").
 					Options(options...).
 					Value(&selectedIPs),
 			),
@@ -861,7 +893,7 @@ func wizardTextInput(title, placeholder string, validate func(string) error) (st
 	value := ""
 	field := huh.NewInput().
 		Title(title).
-		Description("Type /back to return to wizard menu.").
+		Description("/back returns to menu.").
 		Placeholder(placeholder).
 		Value(&value)
 	if validate != nil {
@@ -886,7 +918,7 @@ func wizardMessageInput(title, placeholder string) (string, error) {
 	value := ""
 	field := huh.NewText().
 		Title(title).
-		Description("Type /back to return to wizard menu.").
+		Description("/back returns to menu.").
 		Placeholder(placeholder).
 		Lines(1).
 		ShowLineNumbers(false).
@@ -926,9 +958,9 @@ func wizardSelectMultiTransferKind() (string, error) {
 			huh.NewGroup(
 				huh.NewSelect[string]().
 					Title("What do you want to send?").
-					Description("Choose a transfer type for the selected recipients.").
+					Description("Choose transfer type.").
 					Options(
-						huh.NewOption("← Back to recipient selection", wizardBackValue),
+						huh.NewOption("Back", wizardBackValue),
 						huh.NewOption("Message", "message"),
 						huh.NewOption("File", "file"),
 						huh.NewOption("Folder", "folder"),
@@ -1001,7 +1033,7 @@ func wizardConfirm(title, submitLabel string) (bool, error) {
 		huh.NewGroup(
 			huh.NewConfirm().
 				Title(title).
-				Description("Press Ctrl+C to exit the wizard.").
+				Description("Ctrl+C exits.").
 				Affirmative(submitLabel).
 				Negative("Cancel").
 				Value(&confirmed),
@@ -1022,7 +1054,7 @@ func runWizardMenuForm(status string, form *huh.Form) error {
 	if strings.TrimSpace(status) != "" {
 		fmt.Fprintf(os.Stderr, "%s\n\n", status)
 		// Save a new anchor below status so status remains above the wizard box.
-		fmt.Fprint(os.Stderr, "\033[s")
+		fmt.Fprint(os.Stderr, wizardSaveCursor)
 	}
 	return runWizardFormAtAnchor(form)
 }
@@ -1030,33 +1062,55 @@ func runWizardMenuForm(status string, form *huh.Form) error {
 func runWizardFormAtAnchor(form *huh.Form) error {
 	return form.
 		WithTheme(wizardTheme()).
+		WithWidth(wizardRenderWidth).
+		WithShowHelp(false).
 		WithProgramOptions(
-			tea.WithANSICompressor(),
 			tea.WithOutput(os.Stderr),
+			tea.WithFilter(wizardTeaFilter),
 			tea.WithReportFocus(),
 		).
 		Run()
 }
 
+func wizardTeaFilter(_ tea.Model, msg tea.Msg) tea.Msg {
+	size, ok := msg.(tea.WindowSizeMsg)
+	if !ok {
+		return msg
+	}
+	if size.Width < wizardMinWidth {
+		size.Width = wizardMinWidth
+	}
+	if size.Height < wizardMinHeight {
+		size.Height = wizardMinHeight
+	}
+	return size
+}
+
 func resetWizardRenderAnchor() {
+	wizardAnchorMu.Lock()
+	defer wizardAnchorMu.Unlock()
 	wizardAnchorSet = false
 }
 
 func prepareWizardRenderArea() {
+	wizardAnchorMu.Lock()
+	defer wizardAnchorMu.Unlock()
 	if wizardAnchorSet {
 		// Restore to the previous wizard anchor and clear that region.
-		fmt.Fprint(os.Stderr, "\033[u\033[J")
+		fmt.Fprint(os.Stderr, wizardRestoreCursorAndClear)
 	}
 	// Save cursor as the anchor for the next redraw.
-	fmt.Fprint(os.Stderr, "\033[s")
+	fmt.Fprint(os.Stderr, wizardSaveCursor)
 	wizardAnchorSet = true
 }
 
 func detachWizardForExternalOutput() {
+	wizardAnchorMu.Lock()
+	defer wizardAnchorMu.Unlock()
 	if wizardAnchorSet {
 		// Remove the active wizard frame and release the anchor so upcoming
 		// transfer events stay visible above the next wizard render.
-		fmt.Fprint(os.Stderr, "\033[u\033[J")
+		fmt.Fprint(os.Stderr, wizardRestoreCursorAndClear)
 	}
 	wizardAnchorSet = false
 }
@@ -1064,17 +1118,16 @@ func detachWizardForExternalOutput() {
 func wizardTheme() *huh.Theme {
 	t := huh.ThemeCharm()
 	pink := lipgloss.AdaptiveColor{Light: "#FF2D96", Dark: "#FF4DA6"}
-	pinkSoft := lipgloss.AdaptiveColor{Light: "#FF6EB8", Dark: "#FF7BBF"}
 	white := lipgloss.AdaptiveColor{Light: "#FFFFFF", Dark: "#FFFFFF"}
 
 	t.Focused.Base = t.Focused.Base.
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(pinkSoft).
-		BorderTop(true).
-		BorderRight(true).
-		BorderBottom(true).
-		BorderLeft(true).
-		Padding(0, 1)
+		UnsetBorderStyle().
+		UnsetBorderForeground().
+		BorderTop(false).
+		BorderRight(false).
+		BorderBottom(false).
+		BorderLeft(false).
+		Padding(0, 0)
 	t.Focused.Card = t.Focused.Base
 	t.Focused.Title = t.Focused.Title.Foreground(pink).Bold(true)
 	t.Focused.NoteTitle = t.Focused.NoteTitle.Foreground(pink).Bold(true)
@@ -1348,6 +1401,31 @@ func safePeerLabel(name string) string {
 		return "(unknown)"
 	}
 	return trimmed
+}
+
+func wizardPeerLabel(peer network.Peer) string {
+	const labelLimit = wizardRenderWidth - 2
+	name := safePeerLabel(peer.Username)
+	suffix := fmt.Sprintf(" (%s)", peer.IP)
+	if len([]rune(suffix)) >= labelLimit {
+		return truncateRunes(peer.IP, labelLimit)
+	}
+	nameLimit := labelLimit - len([]rune(suffix))
+	return truncateRunes(name, nameLimit) + suffix
+}
+
+func truncateRunes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	if limit <= 3 {
+		return string(runes[:limit])
+	}
+	return string(runes[:limit-3]) + "..."
 }
 
 func splitMultiArgs(input string) (string, string, bool) {

@@ -304,6 +304,14 @@ func (u *UI) writeLine(line string) {
 	u.progressMu.Unlock()
 
 	if u.rl == nil {
+		if commands.BeginWizardExternalOutput(os.Stderr) {
+			fmt.Fprintf(os.Stderr, "%s\n", line)
+			if active {
+				fmt.Fprintf(os.Stderr, "%s", progressLine)
+			}
+			commands.EndWizardExternalOutput(os.Stderr)
+			return
+		}
 		fmt.Printf("\r\033[K%s\n", line)
 		if active {
 			fmt.Printf("%s", progressLine)
@@ -312,9 +320,17 @@ func (u *UI) writeLine(line string) {
 	}
 
 	u.printMu.Lock()
-	fmt.Fprintf(u.rl.Stderr(), "\r\033[K%s\n", line)
+	stderr := u.rl.Stderr()
+	wizardOutput := commands.BeginWizardExternalOutput(stderr)
+	if !wizardOutput {
+		fmt.Fprint(stderr, "\r\033[K")
+	}
+	fmt.Fprintf(stderr, "%s\n", line)
 	if active {
-		fmt.Fprintf(u.rl.Stderr(), "%s", progressLine)
+		fmt.Fprintf(stderr, "%s", progressLine)
+	}
+	if wizardOutput {
+		commands.EndWizardExternalOutput(stderr)
 	}
 	u.printMu.Unlock()
 }
