@@ -8,6 +8,13 @@ import (
 	"strings"
 )
 
+// LocalPublicKeyFromSecret returns the X25519 public key (hex-encoded)
+// derived from the local long-term secret. Exported so the UI/commands layer
+// can render it for fingerprint display without owning the crypto details.
+func LocalPublicKeyFromSecret(secret string) (string, error) {
+	return localPublicKeyFromSecret(secret)
+}
+
 func localPublicKeyFromSecret(secret string) (string, error) {
 	priv, err := privateKeyFromSecret(secret)
 	if err != nil {

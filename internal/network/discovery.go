@@ -34,6 +34,7 @@ type announcement struct {
 type DiscoveryService struct {
 	cfg       *config.Config
 	logger    *logger.Logger
+	known     *KnownPeers
 	peers     map[string]*Peer
 	mu        sync.RWMutex
 	localMu   sync.RWMutex
@@ -62,6 +63,18 @@ func NewDiscoveryService(cfg *config.Config, logger *logger.Logger) *DiscoverySe
 		peers:  make(map[string]*Peer),
 		stop:   make(chan struct{}),
 	}
+}
+
+// SetKnownPeers attaches a TOFU store to the discovery service. Once set,
+// inbound announcements whose claimed public key does not match the pinned
+// key for that username are dropped (impersonation defence).
+func (d *DiscoveryService) SetKnownPeers(kp *KnownPeers) {
+	d.known = kp
+}
+
+// KnownPeers returns the attached TOFU store (may be nil).
+func (d *DiscoveryService) KnownPeers() *KnownPeers {
+	return d.known
 }
 
 // Start launches announcer and listener goroutines.
@@ -167,10 +180,12 @@ func (d *DiscoveryService) Resolve(target string) (*Peer, error) {
 		clone := *peer
 		return &clone, nil
 	}
-	// Search by username
+	// Search by username (case-insensitive — the rest of the codebase uses
+	// EqualFold for the same comparison, and not aligning here meant
+	// "Alice" sometimes resolved and sometimes didn't).
 	var matches []*Peer
 	for _, peer := range d.peers {
-		if peer.Username == target {
+		if strings.EqualFold(peer.Username, target) {
 			matches = append(matches, peer)
 		}
 	}
@@ -296,6 +311,40 @@ func (d *DiscoveryService) listenLoop() {
 		// Enforce same-subnet operation: ignore announcements not from our subnet.
 		if !sameSubnetIPv4(senderIP, localIP) {
 			continue
+		}
+
+		// Drop announcements that advertise a port we don't speak. Bonjou
+		// uses a single well-known TCP listen port; allowing arbitrary ports
+		// would let an attacker advertise unrelated services (SSH, HTTP, …)
+		// so other clients try to open a Bonjou session against them.
+		expectedPort := d.cfg.ListenPort
+		if expectedPort > 0 && ann.Port != expectedPort {
+			d.logger.Error("discovery: dropping announcement from %s — port %d != expected %d", senderIP, ann.Port, expectedPort)
+			continue
+		}
+
+		// TOFU: pin the username→pubkey binding on first sight and reject
+		// subsequent announcements that claim the same username with a
+		// different key. Without this, any LAN host can spoof a peer's
+		// identity by broadcasting under their name with attacker-controlled
+		// crypto material, then sit in the middle of all "encrypted" chat.
+		username := strings.TrimSpace(ann.Username)
+		if d.known != nil && username != "" && strings.TrimSpace(ann.PublicKey) != "" {
+			outcome, pinned, err := d.known.Pin(username, ann.PublicKey)
+			if err != nil {
+				d.logger.Error("discovery: failed to update known peers: %v", err)
+			}
+			if outcome == PinMismatch {
+				expectedFp := ""
+				if pinned != nil {
+					expectedFp = pinned.Fingerprint
+				}
+				d.logger.Error(
+					"discovery: dropping announcement from %s — '%s' announced fingerprint %s but is pinned to %s. Use @forget %s to accept the new key.",
+					senderIP, username, Fingerprint(ann.PublicKey), expectedFp, username,
+				)
+				continue
+			}
 		}
 
 		// IMPORTANT: Trust the packet source IP for routing/reachability.

@@ -166,10 +166,50 @@ Bonjou is designed to be trustless and secure on local networks.
 *   **Discovery Engine:** Peers are discovered using UDP broadcast on port `46320`. (Note: This generally does not cross routers/VLANs).
 *   **Transfer Protocol:** Messages and files are transmitted via TCP on port `46321`.
 *   **Metadata-First Transfers:** When a peer sends you a file, you receive a manifest preview first. The actual payload is only transferred over TCP *after* you explicitly run `@approve <id>`.
-*   **Storage Locations:** 
+*   **Storage Locations:**
     * Approved files: `~/.bonjou/received/files/`
     * Approved folders: `~/.bonjou/received/folders/`
+    * Pinned peer keys: `~/.bonjou/known_peers.json`
     * Config & State: `~/.bonjou/config.json`
+
+### Encryption (protocol v2)
+
+Bonjou now uses an authenticated, length-prefixed wire format with strong
+defaults. The full design and threat model is in
+[`docs/security-model.md`](docs/security-model.md); the headlines:
+
+*   **AES-256-GCM** authenticated encryption for every envelope, with the
+    wire-format version bound as additional authenticated data so a downgrade
+    attack is rejected at decryption time.
+*   **Chunked AES-GCM** for file and folder payloads — each chunk has its own
+    16-byte GCM tag, so tampering is detected mid-transfer rather than only
+    at the end via a plaintext checksum.
+*   **HKDF-derived per-purpose keys** (`Kenc`, `Kmac`, and a per-stream
+    subkey) so encryption and authentication never share keying material,
+    and nonce reuse across streams is structurally impossible.
+*   **Trust-on-first-use (TOFU)** for peer identities: the first
+    announcement under each username pins that peer's X25519 public key
+    into `~/.bonjou/known_peers.json`. Subsequent announcements with a
+    different key are rejected and logged.
+*   **Replay rejection** via a per-peer nonce cache and a timestamp
+    freshness window (10 minutes past, 1 minute future).
+*   **Incoming size cap** (`max_incoming_bytes`, default 16 GiB) so a
+    malicious sender cannot make the receive loop read forever.
+*   **Setpath safeguards**: `@setpath` refuses system roots and warns when
+    the destination is outside the user's home directory.
+
+Operators can verify pinning with `@known` and `@fingerprint`, and recover
+from legitimate key rotations with `@trust` / `@forget`.
+
+What v2 does **not** yet provide (tracked in
+[`docs/security-model.md`](docs/security-model.md)):
+
+*   **Forward secrecy** — the long-term key derived from
+    `~/.bonjou/config.json` is reused across sessions. A future release
+    will introduce ephemeral DH per connection (Noise-style).
+*   **OS keychain integration** — the secret is still on disk at mode
+    0600; a `SecretStore` abstraction is in place for that work.
+*   **At-rest chat encryption** — `~/.bonjou/logs/chat.log` is plaintext.
 
 ---
 

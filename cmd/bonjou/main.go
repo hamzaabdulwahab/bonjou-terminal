@@ -57,6 +57,12 @@ func main() {
 	}
 
 	discovery := network.NewDiscoveryService(cfg, log)
+	knownPeers, err := network.NewKnownPeers(filepath.Join(cfg.BaseDir, "known_peers.json"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to load known-peers store: %v\n", err)
+		os.Exit(1)
+	}
+	discovery.SetKnownPeers(knownPeers)
 	queueMgr, err := queue.NewManager(cfg.BaseDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to initialise approval queue: %v\n", err)

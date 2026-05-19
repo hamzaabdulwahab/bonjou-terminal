@@ -74,10 +74,20 @@ type UI struct {
 	progressActive bool
 	progressID     string
 	progressLine   string
+	interactive    bool
+
+	// wizardBuffer captures events that arrive while the wizard owns the
+	// alt screen; we replay them on wizard exit so the user does not miss
+	// file/message notifications produced during their wizard interaction.
+	wizardBufMu sync.Mutex
+	wizardBuf   []string
 }
+
+const wizardBufCap = 256
 
 func New(session *session.Session, handler *commands.Handler) (*UI, error) {
 	interactive := term.IsTerminal(int(os.Stdin.Fd()))
+	pasteStdin := newPasteFilterReader(os.Stdin)
 	cfg := &readline.Config{
 		Prompt:                 colorMuted + "> " + colorReset,
 		InterruptPrompt:        colorMuted + "^C" + colorReset + "\n",
@@ -85,7 +95,7 @@ func New(session *session.Session, handler *commands.Handler) (*UI, error) {
 		HistorySearchFold:      true,
 		DisableAutoSaveHistory: true,
 		UniqueEditLine:         true,
-		Stdin:                  os.Stdin,
+		Stdin:                  pasteStdin,
 		Stdout:                 os.Stdout,
 		Stderr:                 os.Stderr,
 	}
@@ -95,17 +105,22 @@ func New(session *session.Session, handler *commands.Handler) (*UI, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !interactive {
+	if interactive {
+		fmt.Fprint(os.Stdout, enableBracketedPaste)
+	} else {
 		fmt.Fprintln(os.Stderr, colorMuted+"(Limited terminal detected; line editing shortcuts may be unavailable.)"+colorReset)
 	}
 	home, _ := os.UserHomeDir()
-	return &UI{
-		session: session,
-		handler: handler,
-		rl:      rl,
-		done:    make(chan struct{}),
-		homeDir: home,
-	}, nil
+	u := &UI{
+		session:     session,
+		handler:     handler,
+		rl:          rl,
+		done:        make(chan struct{}),
+		homeDir:     home,
+		interactive: interactive,
+	}
+	commands.RegisterWizardExitHook(u.flushWizardBuffer)
+	return u, nil
 }
 
 func configureReadline(cfg *readline.Config) {
@@ -125,9 +140,18 @@ func configureReadline(cfg *readline.Config) {
 // Run starts the interactive Bonjou session.
 func (u *UI) Run() {
 	defer u.rl.Close()
+	if u.interactive {
+		defer fmt.Fprint(os.Stdout, disableBracketedPaste)
+	}
 	u.printWelcome()
 	go u.consumeEvents()
 	for {
+		// Re-enable bracketed paste before each prompt. The wizard (bubbletea)
+		// disables it on exit, so without this the next paste after returning
+		// from the wizard would split on embedded newlines.
+		if u.interactive {
+			fmt.Fprint(os.Stdout, enableBracketedPaste)
+		}
 		line, err := u.rl.Readline()
 		if err == readline.ErrInterrupt {
 			u.writeLine(colorMuted + "^C" + colorReset)
@@ -298,20 +322,25 @@ func (u *UI) shutdown() {
 }
 
 func (u *UI) writeLine(line string) {
+	// While the wizard owns the alt screen, any write to the terminal
+	// would corrupt its rendering and leave artifacts on the main screen
+	// once the alt screen exits. Buffer the event instead — the on-exit
+	// hook (registered in New) flushes it back to the main scrollback so
+	// the user sees notifications produced during their wizard session.
+	if commands.WizardRenderActive() {
+		u.bufferWizardLine(line)
+		return
+	}
+	u.emitLine(line)
+}
+
+func (u *UI) emitLine(line string) {
 	u.progressMu.Lock()
 	active := u.progressActive
 	progressLine := u.progressLine
 	u.progressMu.Unlock()
 
 	if u.rl == nil {
-		if commands.BeginWizardExternalOutput(os.Stderr) {
-			fmt.Fprintf(os.Stderr, "%s\n", line)
-			if active {
-				fmt.Fprintf(os.Stderr, "%s", progressLine)
-			}
-			commands.EndWizardExternalOutput(os.Stderr)
-			return
-		}
 		fmt.Printf("\r\033[K%s\n", line)
 		if active {
 			fmt.Printf("%s", progressLine)
@@ -321,18 +350,39 @@ func (u *UI) writeLine(line string) {
 
 	u.printMu.Lock()
 	stderr := u.rl.Stderr()
-	wizardOutput := commands.BeginWizardExternalOutput(stderr)
-	if !wizardOutput {
-		fmt.Fprint(stderr, "\r\033[K")
-	}
+	fmt.Fprint(stderr, "\r\033[K")
 	fmt.Fprintf(stderr, "%s\n", line)
 	if active {
 		fmt.Fprintf(stderr, "%s", progressLine)
 	}
-	if wizardOutput {
-		commands.EndWizardExternalOutput(stderr)
-	}
 	u.printMu.Unlock()
+}
+
+func (u *UI) bufferWizardLine(line string) {
+	u.wizardBufMu.Lock()
+	defer u.wizardBufMu.Unlock()
+	// Drop the oldest entries past the cap so unbounded wizard sessions
+	// (e.g. a user who walks away with the wizard open) can't grow memory
+	// without limit. The newest events are kept because they're usually
+	// the ones the user wants to react to.
+	if len(u.wizardBuf) >= wizardBufCap {
+		u.wizardBuf = u.wizardBuf[len(u.wizardBuf)-wizardBufCap+1:]
+	}
+	u.wizardBuf = append(u.wizardBuf, line)
+}
+
+func (u *UI) flushWizardBuffer() {
+	u.wizardBufMu.Lock()
+	pending := u.wizardBuf
+	u.wizardBuf = nil
+	u.wizardBufMu.Unlock()
+	if len(pending) == 0 {
+		return
+	}
+	u.emitLine(colorMuted + fmt.Sprintf("— Replaying %d event(s) buffered during wizard —", len(pending)) + colorReset)
+	for _, line := range pending {
+		u.emitLine(line)
+	}
 }
 
 func (u *UI) updateProgressLine(id, line string) {

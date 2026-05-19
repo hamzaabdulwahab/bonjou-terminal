@@ -43,7 +43,7 @@ func TestWizardPeerLabelFitsRenderWidth(t *testing.T) {
 		IP:       "192.168.1.37",
 	})
 
-	if got, want := len([]rune(label)), wizardRenderWidth-2; got > want {
+	if got, want := len([]rune(label)), wizardLabelWidth-2; got > want {
 		t.Fatalf("label width = %d, want <= %d: %q", got, want, label)
 	}
 }

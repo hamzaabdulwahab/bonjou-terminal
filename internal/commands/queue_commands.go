@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hamzawahab/bonjou-cli/internal/format"
 	"github.com/hamzawahab/bonjou-cli/internal/queue"
 )
 
@@ -166,13 +167,14 @@ func (h *Handler) cmdView(args string) (Result, error) {
 		if strings.TrimSpace(file.SenderIP) != "" {
 			sender = fmt.Sprintf("%s (%s)", file.Sender, file.SenderIP)
 		}
+		destPath := queue.UniquePath(filepath.Join(h.session.Config.ReceivedFilesDir, file.Name))
 		lines := []string{
 			fmt.Sprintf("Pending file [%d]", file.ID),
 			fmt.Sprintf("Name: %s", file.Name),
 			fmt.Sprintf("From: %s", sender),
 			fmt.Sprintf("Size: %s", formatSize(file.Size)),
 			fmt.Sprintf("Queued: %s", queuedLabel(file.Timestamp)),
-			fmt.Sprintf("Destination: %s", h.session.Config.ReceivedFilesDir),
+			fmt.Sprintf("Destination: %s", destPath),
 		}
 		if preview := strings.TrimSpace(file.Preview); preview != "" {
 			lines = append(lines, fmt.Sprintf("Preview: %s", preview))
@@ -188,6 +190,7 @@ func (h *Handler) cmdView(args string) (Result, error) {
 		return Result{Output: fmt.Sprintf("Error: %v", err)}, nil
 	}
 
+	destPath := queue.UniquePath(filepath.Join(h.session.Config.ReceivedFoldersDir, f.Name))
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("\033[36mPending Folder [%d] '%s/':\033[0m\n", queueID, f.Name))
 	sb.WriteString(fmt.Sprintf("From: %s", f.Sender))
@@ -196,7 +199,7 @@ func (h *Handler) cmdView(args string) (Result, error) {
 	}
 	sb.WriteString(fmt.Sprintf("\nSize: %s\n", formatSize(f.Size)))
 	sb.WriteString(fmt.Sprintf("Queued: %s\n", queuedLabel(f.Timestamp)))
-	sb.WriteString(fmt.Sprintf("Destination: %s\n", h.session.Config.ReceivedFoldersDir))
+	sb.WriteString(fmt.Sprintf("Destination: %s\n", destPath))
 	sb.WriteString(fmt.Sprintf("Next: @approve %d or @reject %d\n", queueID, queueID))
 	sb.WriteString("Status: not downloaded yet")
 
@@ -377,14 +380,5 @@ func queuedLabel(ts time.Time) string {
 }
 
 func formatSize(size int64) string {
-	const unit = 1000
-	if size < unit {
-		return fmt.Sprintf("%d B", size)
-	}
-	div, exp := int64(unit), 0
-	for n := size / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %cB", float64(size)/float64(div), "KMGTPE"[exp])
+	return format.Size(size)
 }

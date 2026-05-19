@@ -13,7 +13,13 @@ import (
 	"time"
 )
 
-const configFileName = "config.json"
+const (
+	configFileName = "config.json"
+
+	// defaultMaxIncomingBytes caps incoming transfers at 16 GiB. Large enough
+	// for typical file/folder shares on a LAN, small enough to bound abuse.
+	defaultMaxIncomingBytes int64 = 16 * 1024 * 1024 * 1024
+)
 
 // Config captures runtime and persistent settings for Bonjou.
 type Config struct {
@@ -29,7 +35,12 @@ type Config struct {
 	LastUpdated        int64  `json:"last_updated"`
 	ChunkSize          int    `json:"chunk_size_bytes"`
 	ChunkTimeoutSecs   int    `json:"chunk_timeout_secs"`
-	configPath         string `json:"-"`
+	// MaxIncomingBytes is the largest file/folder payload (in bytes) we will
+	// accept from a peer. A malicious sender can claim env.Size = 1<<60 to
+	// force the receive loop to read forever; this cap bounds the damage.
+	// Zero/negative means "use default" (defaultMaxIncomingBytes).
+	MaxIncomingBytes int64 `json:"max_incoming_bytes,omitempty"`
+	configPath       string `json:"-"`
 }
 
 // Load retrieves persisted configuration or writes defaults if missing.
@@ -91,6 +102,7 @@ func Default() *Config {
 		LastUpdated:        time.Now().Unix(),
 		ChunkSize:          64 * 1024,
 		ChunkTimeoutSecs:   30,
+		MaxIncomingBytes:   defaultMaxIncomingBytes,
 	}
 	cfg.populateDerived()
 	return cfg
@@ -116,6 +128,7 @@ func (c *Config) Save() error {
 		LastUpdated        int64  `json:"last_updated"`
 		ChunkSize          int    `json:"chunk_size_bytes"`
 		ChunkTimeoutSecs   int    `json:"chunk_timeout_secs"`
+		MaxIncomingBytes   int64  `json:"max_incoming_bytes"`
 	}{
 		Username:           c.Username,
 		ListenPort:         c.ListenPort,
@@ -129,6 +142,7 @@ func (c *Config) Save() error {
 		LastUpdated:        c.LastUpdated,
 		ChunkSize:          c.ChunkSize,
 		ChunkTimeoutSecs:   c.ChunkTimeoutSecs,
+		MaxIncomingBytes:   c.MaxIncomingBytes,
 	}, "", "  ")
 	if err != nil {
 		return err
@@ -199,6 +213,9 @@ func (c *Config) populateDerived() {
 	}
 	if c.ChunkTimeoutSecs > 600 {
 		c.ChunkTimeoutSecs = 600
+	}
+	if c.MaxIncomingBytes <= 0 {
+		c.MaxIncomingBytes = defaultMaxIncomingBytes
 	}
 }
 

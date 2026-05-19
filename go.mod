@@ -1,18 +1,18 @@
 module github.com/hamzawahab/bonjou-cli
 
-go 1.24.0
+go 1.25.0
 
 require (
 	github.com/chzyer/readline v1.5.1
 	github.com/mattn/go-runewidth v0.0.16
-	golang.org/x/term v0.36.0
+	golang.org/x/term v0.43.0
 )
 
 require (
 	github.com/charmbracelet/bubbletea v1.3.6
 	github.com/charmbracelet/huh v0.8.0
 	github.com/charmbracelet/lipgloss v1.1.0
-	golang.org/x/sys v0.37.0
+	golang.org/x/sys v0.44.0
 )
 
 require (
@@ -36,6 +36,7 @@ require (
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	golang.org/x/sync v0.15.0 // indirect
-	golang.org/x/text v0.23.0 // indirect
+	golang.org/x/crypto v0.51.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 )
